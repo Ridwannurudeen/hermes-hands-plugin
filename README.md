@@ -8,7 +8,7 @@ Hermes Hands pairs a Windows or Linux computer with a one-time code. Hermes runs
 
 ## Quick start
 
-1. On the gateway host (Linux, or Windows inside WSL), install the plugin with `hermes plugins install Ridwannurudeen/hermes-hands/hermes-hands --enable`, then run `hermes hands setup` and follow its prompts. Once Hermes Hands is in the plugin catalog, `hermes plugins install hermes-hands` installs the reviewed version instead.
+1. On the gateway host (Linux, or Windows inside WSL), install the plugin with `hermes plugins install Ridwannurudeen/hermes-hands-plugin/hermes-hands --enable`, then run `hermes hands setup` and follow its prompts. Once Hermes Hands is in the plugin catalog, `hermes plugins install hermes-hands` installs the reviewed version instead.
 
    For an unreleased checkout, install the plugin from a repository copy you can access. The device package is distributed separately. Before `hermes-hands==0.2.0` is published on PyPI, install it from a reachable checkout as shown in [Device](#device).
 2. Run the two lines setup prints, `hermes config set terminal.backend hands` and `hermes config set bot_desktop.placement gateway`. Restart the gateway, and start the dashboard on loopback with `hermes dashboard --host 127.0.0.1 --port 9119 --no-open`. Any device that is not the gateway host needs the public HTTPS route in [Setup](#gateway); a loopback URL cannot pair a laptop on another machine.
@@ -38,7 +38,7 @@ Hermes Hands 0.2.0 for the gateway plugin and device package, same version. Requ
 
 The gateway runs on Linux, or on Windows inside WSL. A native Windows gateway is not supported.
 
-1. Install Hermes 0.23.0 or later, then install and enable Hermes Hands with `hermes plugins install Ridwannurudeen/hermes-hands/hermes-hands --enable`. After Hermes Hands is admitted to the plugin catalog, install it from the catalog or with `hermes plugins install hermes-hands`, which installs the reviewed commit.
+1. Install Hermes 0.23.0 or later, then install and enable Hermes Hands with `hermes plugins install Ridwannurudeen/hermes-hands-plugin/hermes-hands --enable`. After Hermes Hands is admitted to the plugin catalog, install it from the catalog or with `hermes plugins install hermes-hands`, which installs the reviewed commit.
 2. Run `hermes hands setup` on the gateway host. It creates the relay seed if missing and asks for the owner Telegram user ID. Configure Telegram and its owner access in Hermes.
 3. Select the Hands terminal backend: `hermes config set terminal.backend hands`. Without it Hermes keeps its default `local` backend, every command runs on the gateway host, and `/hands use <device>` refuses to switch.
 4. Set the placement line printed by setup: `hermes config set bot_desktop.placement gateway`. Without it, Hermes refuses to start browser and computer use tools under any plugin terminal backend, for every conversation in the profile.
@@ -260,11 +260,11 @@ On the gateway:
 
 ## Install from Hermes
 
-Before Hermes Hands is in the plugin catalog: [Install Hermes Hands](hermes://plugin/install?repo=Ridwannurudeen/hermes-hands/hermes-hands&enable=1)
+Before Hermes Hands is in the plugin catalog: [Install Hermes Hands](hermes://plugin/install?repo=Ridwannurudeen/hermes-hands-plugin/hermes-hands&enable=1)
 
 After it is admitted, use the catalog link, which installs the reviewed commit: [Install Hermes Hands from the catalog](hermes://plugin/install?catalog=hermes-hands)
 
-Repository: [Ridwannurudeen/hermes-hands](https://github.com/Ridwannurudeen/hermes-hands)
+Repository: [Ridwannurudeen/hermes-hands-plugin](https://github.com/Ridwannurudeen/hermes-hands-plugin)
 
 ## License
 

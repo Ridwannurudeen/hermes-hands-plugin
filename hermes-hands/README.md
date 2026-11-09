@@ -16,7 +16,7 @@ The gateway asks the helper to approve file reads, searches, writes, patches, an
 
 ## Install and configure
 
-Install Hermes 0.23.0 or later on the gateway. Before catalog admission, install a reachable repository with `hermes plugins install Ridwannurudeen/hermes-hands/hermes-hands --enable`. Then run `hermes hands setup`, apply its backend and placement settings, and start the dashboard on loopback. A device on another machine requires the HTTPS relay route described in the [full setup guide](../README.md#gateway).
+Install Hermes 0.23.0 or later on the gateway. Before catalog admission, install a reachable repository with `hermes plugins install Ridwannurudeen/hermes-hands-plugin/hermes-hands --enable`. Then run `hermes hands setup`, apply its backend and placement settings, and start the dashboard on loopback. A device on another machine requires the HTTPS relay route described in the [full setup guide](../README.md#gateway).
 
 The device needs Python 3.11 or later and Bash. Windows uses Git for Windows. Before a PyPI release, run `pipx install ./device` from a reachable repository checkout. Pair using the command printed by `/hands pair <name>`, start `hermes-hands serve --witness`, and select it from a direct owner chat with `/hands use <name>`. Run only one device agent per device home.
 

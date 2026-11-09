@@ -3,7 +3,7 @@ label: Hermes Hands
 kind: backend
 version: "0.2.0"
 author: Ridwan Nurudeen
-homepage: https://github.com/Ridwannurudeen/hermes-hands
+homepage: https://github.com/Ridwannurudeen/hermes-hands-plugin
 description: >
   Help a paired Windows or Linux computer from chat while Hermes stays on a Linux or WSL gateway.
   Optional witness mode requires local consent, prints commands with timestamps, asks before every
