@@ -119,7 +119,11 @@ def register_tools(ctx) -> None:
                 "For any request to run a checkup, perform a health check, or diagnose why a laptop is slow, "
                 "call hands_checkup first. This built-in read-only device report separates observed facts "
                 "from inferences. Ad hoc terminal commands on witness devices are blocked or require "
-                "owner approval."
+                "owner approval. When the user requests only observed facts and unavailable items, "
+                "report only those without unsolicited causal claims or repair advice. "
+                "Do not infer that a reboot marker causes memory pressure or slowness, or guarantee "
+                "that a restart clears it, from checkup facts alone. "
+                "An empty inferences list does not establish a cause."
             ),
             "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
         },

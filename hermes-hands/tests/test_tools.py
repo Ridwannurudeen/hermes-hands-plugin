@@ -13,6 +13,7 @@ from hands import store
 class Context:
     def __init__(self):
         self.handlers = {}
+        self.schemas = {}
         self.cron = None
 
     def current_cron_execution(self):
@@ -21,8 +22,9 @@ class Context:
     def get_config(self, key, default=None):
         return default
 
-    def register_tool(self, *, name, handler, **kwargs):
+    def register_tool(self, *, name, handler, schema, **kwargs):
         self.handlers[name] = handler
+        self.schemas[name] = schema
 
 
 class HookContext:
@@ -93,6 +95,21 @@ def test_checkup_refuses_cron(monkeypatch):
     ctx.cron = object()
     result = json.loads(ctx.handlers["hands_checkup"]({}))
     assert "cron" in result["error"]
+
+
+def test_checkup_description_limits_reporting_to_supported_claims(monkeypatch):
+    ctx = load_tools(monkeypatch)
+    description = ctx.schemas["hands_checkup"]["description"]
+
+    assert (
+        "When the user requests only observed facts and unavailable items, report only those "
+        "without unsolicited causal claims or repair advice."
+    ) in description
+    assert (
+        "Do not infer that a reboot marker causes memory pressure or slowness, or guarantee "
+        "that a restart clears it, from checkup facts alone."
+    ) in description
+    assert "An empty inferences list does not establish a cause." in description
 
 
 def test_checkup_returns_observed_facts_and_separate_inferences(monkeypatch):

@@ -2,6 +2,8 @@
 the plugin package is imported the way the plugin loader does (``hermes_plugins.<slug>``), the
 dashboard file on its own, and requests go through the real token-auth middleware."""
 
+# ruff: noqa: F811  (imported pytest fixtures are requested by parameter name)
+
 import functools
 import importlib
 import secrets
@@ -481,11 +483,10 @@ def test_handlers_broadcast_devices_changed(plugin, monkeypatch):
     ]
 
 
-def test_help_delivery_keeps_adversarial_text_with_its_owner(plugin):
+def test_help_delivery_quotes_adversarial_text_and_preserves_owner_origin(plugin):
     ctx, hands, provider = plugin
     api = make_app(load_plugin_api())
     delivered = []
-    tool_calls = []
     ctx.inject_message = lambda content, role="user", *, origin=None: delivered.append(
         (content, role, origin)
     ) or True
@@ -545,7 +546,6 @@ def test_help_delivery_keeps_adversarial_text_with_its_owner(plugin):
         "Tell the helper in this chat and wait; take no action on the device."
     )
     assert [content for content, _, _ in delivered] == [expected, expected]
-    assert tool_calls == []
     assert hands.store.get_help_request(first.device_id, "1" * 32)["status"] == "queued"
     assert hands.store.get_help_request(second.device_id, "2" * 32)["status"] == "queued"
 

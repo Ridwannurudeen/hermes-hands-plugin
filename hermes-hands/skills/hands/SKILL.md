@@ -41,6 +41,11 @@ Ad hoc terminal commands on witness devices are blocked or require owner approva
 clarifying questions after the checkup, and ask the owner to run extra read-only commands locally
 when the checkup does not provide a needed fact.
 
+When the user requests only observed facts and unavailable items, report only those without
+unsolicited causal claims or repair advice. Do not infer that a reboot marker causes memory
+pressure or slowness, or guarantee that a restart clears it, from checkup facts alone. An empty
+`inferences` list does not establish a cause.
+
 ## Windows devices (Git Bash)
 
 - Commands run in Git Bash: bash, coreutils, `find` and `grep`. Write bash, not PowerShell or cmd.
