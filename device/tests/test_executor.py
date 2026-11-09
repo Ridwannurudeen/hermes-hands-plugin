@@ -16,7 +16,7 @@ from hermeshands_device import executor
 
 
 def test_windowsapps_which_candidate_rejected(monkeypatch, tmp_path):
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
     monkeypatch.delenv("HERMES_HANDS_BASH", raising=False)
     monkeypatch.setattr(
@@ -30,7 +30,7 @@ def test_resolve_bash_probes_each_candidate_once(monkeypatch, tmp_path):
     bash = tmp_path / "bash.exe"
     bash.write_bytes(b"")
     monkeypatch.setattr(executor, "_PROBED", {})
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setenv("HERMES_HANDS_BASH", str(bash))
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
@@ -50,7 +50,7 @@ def test_cached_bash_is_reprobed_when_file_changes(monkeypatch, tmp_path):
     bash = tmp_path / "bash.exe"
     bash.write_bytes(b"old")
     monkeypatch.setattr(executor, "_PROBED", {})
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setenv("HERMES_HANDS_BASH", str(bash))
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
@@ -75,7 +75,7 @@ def test_failed_cached_bash_reprobe_uses_next_candidate(monkeypatch, tmp_path):
     preferred.write_bytes(b"old")
     fallback.write_bytes(b"bash")
     monkeypatch.setattr(executor, "_PROBED", {})
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setenv("HERMES_HANDS_BASH", str(preferred))
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "none"))
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
@@ -408,7 +408,7 @@ def test_terminate_kills_checked_descendants_after_job_termination(monkeypatch):
     reused = ReusedProcess(9876, 2.0)
     root = Process(4321, 1.0, (escaped, reused))
     processes = {process.pid: process for process in (root, escaped, reused)}
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: processes[pid])
     monkeypatch.setattr(
         executor,
@@ -443,7 +443,7 @@ def test_terminate_does_not_kill_reused_root_pid(monkeypatch):
             calls.append("kill")
 
     process = ReusedProcess()
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: process)
     monkeypatch.setattr(
         executor,
@@ -573,7 +573,7 @@ def test_corrupt_process_record_does_not_stop_reaping(monkeypatch, tmp_path, con
 def test_reaped_process_start_time_mismatch_does_not_kill(monkeypatch):
     calls = []
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: type("Process", (), {"create_time": lambda self: 1.0, "kill": lambda self: calls.append(pid)})())
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     executor.terminate_recorded(1234, 2.0)
     assert calls == []
 
@@ -581,7 +581,7 @@ def test_reaped_process_start_time_mismatch_does_not_kill(monkeypatch):
 def test_recorded_posix_reap_kills_the_process_group(monkeypatch):
     killed = []
     process = type("Process", (), {"create_time": lambda self: 2.0})()
-    monkeypatch.setattr(executor.os, "name", "posix")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
     monkeypatch.setattr(executor.signal, "SIGKILL", 9, raising=False)
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: process)
     monkeypatch.setattr(executor.os, "killpg", lambda pid, sig: killed.append((pid, sig)), raising=False)
@@ -591,7 +591,7 @@ def test_recorded_posix_reap_kills_the_process_group(monkeypatch):
 
 def test_open_windows_job_requests_terminate_access(monkeypatch):
     kernel32 = SimpleNamespace(OpenJobObjectW=Mock(return_value=4321))
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
 
     assert executor._open_windows_job(1234, 1.0) == 4321
@@ -609,7 +609,7 @@ def test_create_windows_job_sets_kill_on_close_and_resumes_after_assignment(monk
         CloseHandle=Mock(side_effect=lambda handle: events.append(("close-handle", handle.value))),
         TerminateJobObject=Mock(),
     )
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
     monkeypatch.setattr(ctypes, "windll", SimpleNamespace(kernel32=kernel32), raising=False)
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: SimpleNamespace(threads=lambda: [SimpleNamespace(id=333)]))
@@ -643,7 +643,7 @@ def test_windows_executor_starts_process_suspended_until_job_setup(monkeypatch, 
             return 1
 
     process = Process()
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(executor, "resolve_bash", lambda: "bash.exe")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 1.0))
@@ -676,7 +676,7 @@ def test_windows_job_close_waits_for_inflight_termination(monkeypatch):
         closed.set()
 
     kernel32 = SimpleNamespace(TerminateJobObject=Mock(side_effect=terminate), CloseHandle=Mock(side_effect=close))
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
     monkeypatch.setattr(executor, "_WINDOWS_JOBS", {1234: 5678})
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 1.0, children=lambda recursive=False: [], kill=lambda: None))
@@ -709,7 +709,7 @@ def test_close_windows_job_keeps_handle_until_active_process_exits(monkeypatch):
         QueryInformationJobObject=Mock(side_effect=query),
         CloseHandle=Mock(side_effect=lambda handle: closed.set()),
     )
-    monkeypatch.setattr(executor.os, "name", "nt")
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
     monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
     monkeypatch.setattr(executor, "_WINDOWS_JOBS", {1234: 5678})
     process = SimpleNamespace(pid=1234)
