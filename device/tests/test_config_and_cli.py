@@ -364,7 +364,7 @@ def test_witness_requires_stdin_and_stdout_ttys(monkeypatch, capsys, input_tty, 
 
 def test_witness_refuses_pythonw(monkeypatch, capsys):
     console = FakeConsole("Y")
-    _prepare_witness_cli(monkeypatch, console, executable=r"C:\Python\pythonw.exe")
+    _prepare_witness_cli(monkeypatch, console, executable=str(cli.Path("Python") / "pythonw.exe"))
 
     assert cli.main(["serve", "--witness"]) == 1
 

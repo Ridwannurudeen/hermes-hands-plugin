@@ -160,6 +160,9 @@ def test_control_error_replies_reject_signature_mutants(monkeypatch, status, err
 
 
 def test_device_loop_client_ignores_environment_proxies(monkeypatch):
+    private, public = generate_keypair()
+    monkeypatch.setattr(loop, "get_or_create", lambda: (private, public))
+    monkeypatch.setattr(config, "load", lambda: {})
     monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
     agent = loop.DeviceLoop(transport=httpx.MockTransport(lambda request: httpx.Response(204, request=request)))
     try:

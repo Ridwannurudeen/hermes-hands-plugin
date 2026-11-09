@@ -14,8 +14,9 @@ def _set_python_interpreter(monkeypatch, tmp_path):
     return pythonw
 
 
-def test_install_service_calls_schtasks_with_xml(monkeypatch):
+def test_install_service_calls_schtasks_with_xml(monkeypatch, tmp_path):
     monkeypatch.setattr(service.sys, "platform", "win32")
+    _set_python_interpreter(monkeypatch, tmp_path)
     monkeypatch.setattr(service.os, "environ", {"USERDOMAIN": "LAPTOP", "USERNAME": "A User"})
     monkeypatch.setattr(service.Path, "home", lambda: service.Path(r"C:\Users\A User"))
     calls = []
