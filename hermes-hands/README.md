@@ -22,6 +22,8 @@ Install Hermes 0.23.0 or later on the gateway. Before catalog admission, install
 
 The device needs Python 3.11 or later and Bash. Windows uses Git for Windows. Before a PyPI release, run `pipx install ./device` from a reachable repository checkout. Pair using the command printed by `/hands pair <name>`, start `hermes-hands serve --witness`, and select it from a direct owner chat with `/hands use <name>`. Run only one device agent per device home.
 
+For the Desktop pane, open **Capabilities → Plugins**, search for **Hands**, and enable the **Desktop** part of **Hermes Hands**. It starts disabled in a fresh browser origin. Open a conversation to select its target or pair a device; the status chip follows that conversation's target.
+
 See the [full guide](../README.md) for prerequisites, nginx configuration, policy acceptance after upgrades, doctor checks, data retention, and uninstall steps.
 
 ## Limits and data handling
@@ -44,6 +46,12 @@ PYTHONPATH=/path/to/hermes-agent python -m pytest hermes-hands/tests device/test
 
 Plugin validation reported a safe security scan, matching capabilities, and a clean Desktop SDK surface, with warnings for 15 private-core import sites and in-process dashboard authentication. Plugin doctor passed with three tools and one hook.
 
-A fresh in-process Linux checkup under WSL returned 27 schema-v1 facts, no inferences, and unsupported for an incomplete TEMP scan. This rechecked the fact collector, not the full relay or witness transport. Human Telegram help delivery, screenshot delivery, and the final prompt/transcript changes still need live verification.
+A fresh in-process Linux checkup under WSL returned 27 schema-v1 facts, no inferences, and unsupported for an incomplete TEMP scan. This rechecked the fact collector, not the full relay or witness transport.
 
 On 9 November 2026 from 16:22:41 to 16:24:23 WAT, source candidate `5b6524607810dd0f4b9c79eeb95153a3532171b9` passed a public HTTPS smoke test through `https://hands.gudman.xyz`. A disposable Windows device paired, came online, returned an exact command marker with exit code 0, and returned a schema-v1 checkup with 27 facts. Offline and revoked requests failed closed, and revocation stopped the reconnected agent. This was normal mode; witness, phone, hotspot, Telegram, and screenshots were not tested in that run.
+
+A later owner-operated Telegram witness run confirmed screenshot delivery to the phone after consent, no image after decline, a 30-second unanswered screenshot timeout, optional `H` help delivery after explicit gateway opt-in, separate file-read and search approvals, stop during `sleep 30`, refusal of subsequent work, and verified text and signed JSON receipts. Stop latency was not measured. The checkup delivered 27 facts and no inferences, but the model added unsupported cause guidance; the subsequent guidance fix still needs an owner retest.
+
+A separate normal-mode public HTTPS test passed seven transport checks over a phone hotspot with VPN TUN active. It did not test public-relay Telegram witness mode. The official browser-hosted Desktop interface on `d3cd2a147af1d749f74d2caefe855f46b0afaeb5` loaded the pane and chip after activation, displayed relay/device state, switched a disposable conversation's target and restored `server`, and checked empty-name Pair button behavior. UI code minting and native Electron were not tested.
+
+Controlled stale-input recovery after a timeout within the same session, the owner checkup-guidance retest, and Windows scheduled-task installation and logon startup remain unverified live. The native Windows service XML dry run passed without installing a task.

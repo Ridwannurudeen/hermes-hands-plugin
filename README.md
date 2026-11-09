@@ -71,6 +71,10 @@ server {
 
 Then run `hermes hands doctor`. It exits non-zero if any check fails: `terminal.backend` must be `hands`, `dashboard_url` must be a loopback address, the relay must answer there, `dashboard.public_url` (or `HERMES_DASHBOARD_PUBLIC_URL`) must be an `https` URL or unset, and the relay's heartbeat row must be visible after `/local/state`. When a public URL is set, `dashboard.basic_auth` needs a username and either a password or password hash; the corresponding `HERMES_DASHBOARD_BASIC_AUTH_*` variables override those config values. The heartbeat check shows that the gateway and the dashboard share a plugin data directory; `doctor` does not compare the two paths. It also checks the explicit gateway injection permission needed for optional witness `H` help; leaving that feature disabled produces a `WARN` that H help is unavailable and does not change the doctor exit status or disable other Hands features.
 
+### Desktop pane
+
+In the Hermes Desktop interface, open **Capabilities → Plugins**, search for **Hands**, and enable the **Desktop** part of **Hermes Hands**. The frontend part starts disabled in a fresh browser origin. The Hands pane shows relay and device state; its target selector and status chip follow the focused conversation. Open a conversation before choosing its target or pairing a device.
+
 ### Device
 
 On Windows, in PowerShell:
@@ -246,7 +250,13 @@ An owner-operated Telegram run confirmed device selection, a checkup report, an 
 
 A public HTTPS smoke test on 9 November 2026, from 16:22:41 to 16:24:23 WAT, used source candidate `5b6524607810dd0f4b9c79eeb95153a3532171b9`. A disposable Windows device paired with `https://hands.gudman.xyz`, came online, ran a harmless command with the expected marker and exit code 0, and returned a schema-v1 checkup with 27 facts. Offline and revoked device requests failed closed; revocation stopped the reconnected agent. This used normal device mode. It did not test witness mode, Telegram, a phone, a hotspot, or screenshots.
 
-Successful help delivery to a chat, screenshot delivery in Telegram, the final prompt-timeout recovery and command-transcript changes, the Desktop pane, and the Windows service installer still need live verification. macOS is not a supported device platform.
+A later owner-operated Telegram witness run confirmed screenshot delivery to the phone after local consent, no image after an explicit decline, and an unanswered request expiring after 30 seconds. Optional `H` help reached the phone after the gateway owner explicitly enabled `allow_gateway_injection`. File reads and searches each presented a separate approval. Stopping an active `sleep 30` prevented a subsequent `pwd`; the text receipt and signed JSON receipt were verified. This run did not measure stop latency. The checkup delivered 27 facts and no inferences, but the model added unsupported cause guidance; the subsequent guidance fix has not yet been retested by the owner.
+
+A separate normal-mode public HTTPS test passed all seven transport checks while the Windows device used a phone hotspot with VPN TUN active. It did not test Telegram witness mode over the public relay.
+
+The official browser-hosted Desktop interface was tested with source candidate `d3cd2a147af1d749f74d2caefe855f46b0afaeb5`. Enabling the Desktop part loaded the pane and status chip, displayed the live relay and an offline paired device, and switched a disposable conversation from `server` to that device and back. The Pair button was disabled for an empty name and enabled for a supplied name; minting a code through the UI was not tested. Native Electron was not tested.
+
+Remaining live checks are controlled stale-input recovery after a prompt timeout within the same session, the owner retest of checkup response guidance, and Windows scheduled-task installation and logon startup. The service installer's native Windows XML dry run passed, but no scheduled task was installed. macOS is not a supported device platform.
 
 ## Uninstall
 
