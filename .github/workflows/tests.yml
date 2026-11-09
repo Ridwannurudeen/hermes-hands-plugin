@@ -1,0 +1,72 @@
+name: plugin tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  plugin:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          path: hermes-hands
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: v0.23.0
+          path: hermes-agent
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
+        with:
+          python-version: "3.14"
+      - name: Install Hermes core and test dependencies
+        shell: bash
+        run: |
+          python -m pip install uv
+          python -c 'import sys,tomllib; print("\n".join(tomllib.load(open(sys.argv[1], "rb")).get("tool", {}).get("uv", {}).get("override-dependencies", [])))' hermes-agent/pyproject.toml > "$RUNNER_TEMP/core-overrides.txt"
+          python -m uv venv .venv
+          python -m uv pip install --python .venv --override "$RUNNER_TEMP/core-overrides.txt" -e ./hermes-agent -e ./hermes-hands/device pytest pytest-asyncio pyyaml ruamel.yaml
+          python -c 'import os,sys; p=".venv/Scripts" if os.name == "nt" else ".venv/bin"; open(os.environ["GITHUB_PATH"], "a", encoding="utf-8").write(os.path.abspath(p)+os.linesep)'
+      - name: Validate plugin and doctor
+        shell: bash
+        working-directory: hermes-hands/hermes-hands
+        env:
+          HERMES_HOME: ${{ runner.temp }}/hermes-home
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+        run: |
+          python -m hermes_cli.main plugins validate .
+          python -m hermes_cli.main plugins doctor . --ci
+      - name: Run plugin tests
+        shell: bash
+        working-directory: hermes-hands/hermes-hands
+        env:
+          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+        run: python -m pytest tests ../device/tests -q
+      - name: Validate catalog shape
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/catalog"
+          cat > "$RUNNER_TEMP/catalog/hermes-hands.yaml" <<'EOF'
+          name: hermes-hands
+          repo: https://github.com/example/hermes-hands
+          subdir: hermes-hands
+          sha: "0000000000000000000000000000000000000000"
+          version: "0.1.0"
+          title: Hermes Hands
+          description: Local CI structural validation.
+          maintainer: CI
+          EOF
+          python hermes-agent/scripts/validate_plugin_catalog.py "$RUNNER_TEMP/catalog/hermes-hands.yaml"
+      - name: Scan plugin payloads
+        run: python hermes-agent/scripts/scan_plugin_payloads.py hermes-hands
+      - name: Check Windows footguns
+        run: python hermes-hands/scripts/check-windows-footguns.py --all

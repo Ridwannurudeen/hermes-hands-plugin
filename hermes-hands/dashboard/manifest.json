@@ -1,0 +1,1 @@
+{"name": "hermes-hands", "label": "Hermes Hands", "tab": {"path": "/hermes-hands", "hidden": true}, "entry": "dist/index.js", "api": "plugin_api.py"}

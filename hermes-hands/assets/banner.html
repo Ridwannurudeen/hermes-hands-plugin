@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Hermes Hands banner</title>
+<style>
+  :root {
+    --ground: #E9EBEC;
+    --ink: #14171B;
+    --ink-2: #4B5259;
+    --metal: #3A4047;
+    --screen: #262B31;
+    --accent: #E0531F;
+  }
+  html, body {
+    margin: 0;
+    width: 1200px;
+    height: 600px;
+    overflow: hidden;
+    background: var(--ground);
+  }
+  body {
+    position: relative;
+    color: var(--ink);
+    font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .copy {
+    position: absolute;
+    left: 88px;
+    top: 0;
+    bottom: 0;
+    width: 640px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+  }
+  h1 {
+    margin: 0;
+    font-family: Bahnschrift, "DIN Alternate", "Segoe UI", system-ui, sans-serif;
+    font-weight: 600;
+    font-size: 132px;
+    line-height: 0.9;
+    letter-spacing: -0.02em;
+  }
+  .tagline {
+    margin: 44px 0 0;
+    font-family: Bahnschrift, "Segoe UI", system-ui, sans-serif;
+    font-size: 38px;
+    line-height: 1.2;
+    font-weight: 400;
+    letter-spacing: -0.01em;
+  }
+  .secondary {
+    margin: 14px 0 0;
+    font-size: 28px;
+    line-height: 1.3;
+    color: var(--ink-2);
+  }
+  svg.diagram {
+    position: absolute;
+    left: 0;
+    top: 0;
+  }
+  .label {
+    font-family: Bahnschrift, "Segoe UI", system-ui, sans-serif;
+    font-size: 20px;
+    font-weight: 600;
+    fill: var(--ink);
+  }
+  .note {
+    font-family: "Segoe UI", system-ui, sans-serif;
+    font-size: 17px;
+    fill: var(--ink-2);
+  }
+</style>
+</head>
+<body>
+  <div class="copy">
+    <h1>Hermes<br>Hands</h1>
+    <p class="tagline">Your own laptop as Hermes&rsquo;s hands.</p>
+    <p class="secondary">Native Windows.<br>No Hermes on the laptop.</p>
+  </div>
+
+  <svg class="diagram" width="1200" height="600" viewBox="0 0 1200 600" aria-hidden="true">
+    <!-- server: two rack units -->
+    <rect x="784" y="97" width="232" height="54" rx="6" fill="var(--ink)"/>
+    <rect x="784" y="159" width="232" height="54" rx="6" fill="var(--ink)"/>
+    <g fill="var(--metal)">
+      <rect x="804" y="117" width="64" height="5" rx="2.5"/>
+      <rect x="804" y="127" width="64" height="5" rx="2.5"/>
+      <rect x="804" y="179" width="64" height="5" rx="2.5"/>
+      <rect x="804" y="189" width="64" height="5" rx="2.5"/>
+    </g>
+    <circle cx="992" cy="124" r="4.5" fill="#9AA1A8"/>
+    <circle cx="992" cy="186" r="4.5" fill="#9AA1A8"/>
+
+    <!-- laptop -->
+    <rect x="800" y="356" width="200" height="126" rx="8" fill="var(--ink)"/>
+    <rect x="812" y="368" width="176" height="104" rx="3" fill="var(--screen)"/>
+    <path d="M772 486 H1028 L1020 500 H780 Z" fill="var(--ink)"/>
+    <rect x="878" y="486" width="44" height="4" rx="2" fill="var(--metal)"/>
+
+    <!-- link: the laptop dials out to the server -->
+    <line x1="900" y1="348" x2="900" y2="225" stroke="var(--accent)" stroke-width="4" stroke-linecap="round"/>
+    <path d="M888 237 L900 221 L912 237" fill="none" stroke="var(--accent)" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="900" cy="348" r="6" fill="var(--accent)"/>
+
+    <!-- lock -->
+    <circle cx="900" cy="285" r="24" fill="var(--accent)"/>
+    <path d="M892 282 V276 a8 8 0 0 1 16 0 V282" fill="none" stroke="var(--ground)" stroke-width="3.2"/>
+    <rect x="888" y="281" width="24" height="17" rx="3" fill="var(--ground)"/>
+
+    <text class="label" x="938" y="281">Ed25519</text>
+    <text class="note" x="938" y="304">signed both ways</text>
+    <text class="label" x="1036" y="152">Hermes</text>
+    <text class="note" x="1036" y="175">your server</text>
+    <text class="label" x="1036" y="416">Laptop</text>
+    <text class="note" x="1036" y="439">dials out</text>
+  </svg>
+</body>
+</html>

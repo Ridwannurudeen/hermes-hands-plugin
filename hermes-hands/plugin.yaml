@@ -1,0 +1,25 @@
+name: hermes-hands
+label: Hermes Hands
+kind: backend
+version: "0.2.0"
+author: Ridwan Nurudeen
+homepage: https://github.com/Ridwannurudeen/hermes-hands
+description: >
+  Help a paired Windows or Linux computer from chat while Hermes stays on a Linux or WSL gateway.
+  Optional witness mode requires local consent, prints commands with timestamps, asks before every
+  screenshot, and lets the person stop with S. The gateway asks the helper to approve file operations
+  and commands outside an exact read-only list. Sessions end after 30 minutes with signed receipts.
+  The device connects out over HTTPS with pinned Ed25519 keys. Offline, revoked, or unreachable
+  device targets fail closed. Select it with terminal.backend: hands.
+requires_hermes: ">=0.23.0"
+python_dependencies: []
+provides_tools: [hands_screenshot, hands_devices, hands_checkup]
+provides_hooks: [pre_tool_call]
+requires_env: []
+config_schema:
+  HANDS_RELAY_SEED: {type: secret, env: HANDS_RELAY_SEED, description: "Relay signing seed. Written once by hermes hands setup."}
+  default_target: {type: str, default: server, description: "Target for chats that have not chosen one. server = this machine; under this backend Hermes takes no file checkpoints, on server too."}
+  dashboard_url: {type: str, default: "http://127.0.0.1:9119", description: "Loopback address of the dashboard that hosts the relay."}
+  owner_ids: {type: list, default: [], description: "platform:user_id entries allowed to pair, revoke and switch targets from a chat. hermes hands setup fills this. Empty: the platform's allow_admin_from list for that chat scope, else local surfaces only."}
+  offline_after_seconds: {type: int, default: 20}
+  inline_output_limit_bytes: {type: int, default: 1048576}
