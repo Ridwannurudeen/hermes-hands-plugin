@@ -67,6 +67,15 @@ def register_cli(ctx, *, has_seed: bool) -> None:
             # Before the prompt, so every run shows them, an aborted prompt included.
             print("Select the Hands backend with: hermes config set terminal.backend hands")
             print("Set desktop placement with: hermes config set bot_desktop.placement gateway")
+            print(
+                "Optional owner opt-in for witness H help: H sends quoted device text as a user message "
+                "to the saved owner chat and starts an agent turn. Asking the model to relay it and wait "
+                "cannot guarantee that the model will avoid tool calls."
+            )
+            print(
+                "To opt in, run: hermes config set "
+                "plugins.entries.hermes-hands.allow_gateway_injection true"
+            )
             print("Then restart the gateway and the dashboard.")
             owner_id = input("Owner Telegram user id: ").strip()
             if owner_id:
@@ -144,6 +153,20 @@ def register_cli(ctx, *, has_seed: bool) -> None:
                 else "The relay answered but wrote no heartbeat row in this HERMES_HOME, so the gateway "
                 "and the dashboard use different plugin data directories.",
             )
+            from hermes_cli.config import load_config_readonly
+
+            entry = load_config_readonly()
+            for key in ("plugins", "entries", "hermes-hands"):
+                entry = entry.get(key) if isinstance(entry, dict) else None
+            if isinstance(entry, dict) and entry.get("allow_gateway_injection") is True:
+                print("PASS Witness H help gateway injection is explicitly enabled")
+            else:
+                print(
+                    "WARN Witness H help is unavailable. Optional owner opt-in: H starts an agent "
+                    "turn in the saved owner chat. To enable it, run hermes config set "
+                    "plugins.entries.hermes-hands.allow_gateway_injection true, then restart the gateway. "
+                    "Leave it disabled if you do not want device help text to trigger agent turns."
+                )
             # Non-zero return exits via hermes_cli/main.py:3533-3537.
             return 1 if failures else 0
 

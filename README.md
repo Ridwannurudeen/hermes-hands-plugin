@@ -69,7 +69,7 @@ server {
 
 `client_max_body_size 4m;` lets a screenshot of up to 2 MiB through; without it nginx refuses any request body over 1 MiB. `server_name` must be the host of `dashboard.public_url`, because the dashboard refuses any other host name. Do not add the `return 404` location to a host that serves anything else. Keep the dashboard bound to loopback. Do not expose `/local/*` or `/ui/*` through the public route.
 
-Then run `hermes hands doctor`. It exits non-zero if any check fails: `terminal.backend` must be `hands`, `dashboard_url` must be a loopback address, the relay must answer there, `dashboard.public_url` (or `HERMES_DASHBOARD_PUBLIC_URL`) must be an `https` URL or unset, and the relay's heartbeat row must be visible after `/local/state`. When a public URL is set, `dashboard.basic_auth` needs a username and either a password or password hash; the corresponding `HERMES_DASHBOARD_BASIC_AUTH_*` variables override those config values. That last check is what shows that the gateway and the dashboard share a plugin data directory; `doctor` does not compare the two paths.
+Then run `hermes hands doctor`. It exits non-zero if any check fails: `terminal.backend` must be `hands`, `dashboard_url` must be a loopback address, the relay must answer there, `dashboard.public_url` (or `HERMES_DASHBOARD_PUBLIC_URL`) must be an `https` URL or unset, and the relay's heartbeat row must be visible after `/local/state`. When a public URL is set, `dashboard.basic_auth` needs a username and either a password or password hash; the corresponding `HERMES_DASHBOARD_BASIC_AUTH_*` variables override those config values. The heartbeat check shows that the gateway and the dashboard share a plugin data directory; `doctor` does not compare the two paths. It also checks the explicit gateway injection permission needed for optional witness `H` help; leaving that feature disabled produces a `WARN` that H help is unavailable and does not change the doctor exit status or disable other Hands features.
 
 ### Device
 
@@ -124,7 +124,15 @@ hermes-hands serve --witness
 
 The command requires stdin and stdout TTYs. It does not run under `pythonw` or as a service. The console shows the paired owner label when configured, otherwise the device ID, the gateway host, the 30 minute session limit, the available features, and the stop key. The person at the device must type `y` or `Y` at `Start witness mode? [Y/N]` to begin. `S` stops before the session starts. Other input leaves witness mode inactive.
 
-The session lasts at most 30 minutes. Press `S` or `s` to stop. Press `H` to write a help request, or Escape to cancel that request. Up to three help requests are accepted per session. The helper needs a saved owner chat origin from `/hands use` for the relay to accept a request. An accepted request is marked pending until the gateway delivers it. The device console says when the request was not sent or when delivery is still pending.
+To enable optional `H` help, the gateway owner must explicitly opt in on the gateway host, using the intended Hermes profile:
+
+```sh
+hermes config set plugins.entries.hermes-hands.allow_gateway_injection true
+```
+
+Restart the gateway after changing it. Setup prints this optional command but never enables the permission itself. Hermes requires the boolean `true` at the plugin entry root; putting it under `settings` does not grant permission. Leave it disabled if device help text should not start agent turns. This permission allows quoted device text to enter the saved owner chat as a user message and start an agent turn; it cannot guarantee that the model will avoid tool calls.
+
+The session lasts at most 30 minutes. Press `S` or `s` to stop. Press `H` to write a help request, or Escape to cancel that request. Up to three help requests are accepted per session. The helper needs a saved owner chat origin from `/hands use` for the relay to accept a request, and the explicit gateway injection permission above for the gateway to deliver it. An accepted request is marked pending until the gateway delivers it. The device console says when the request was not sent or when delivery is still pending.
 
 Help text is filtered to printable characters, capped at 200 characters, quoted as untrusted device data, and injected into the saved helper conversation as a user-role model turn. It is not a direct notification with fixed text. The model is asked to relay the message and wait, but that wording cannot enforce a no-tool boundary. Treat device help text as a prompt-injection surface; witness approvals still apply to subsequent tool calls. Gateway acceptance of an injected turn does not prove the reply reached Telegram.
 

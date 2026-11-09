@@ -1,6 +1,8 @@
 """The gateway client and RemoteProcessHandle against a real Relay, through the MockTransport seam,
 with a fake device agent on a thread."""
 
+# ruff: noqa: F811 -- pytest fixture parameters intentionally shadow their imports.
+
 import functools
 import logging
 import os
@@ -230,7 +232,7 @@ def test_request_screenshot_returns_png_bytes(wired):
         assert client.state()["devices"][0]["name"] == "laptop"
 
 
-def test_screenshot_decline_is_reported_without_guessing(monkeypatch):
+def test_screenshot_not_approved_does_not_claim_a_person_said_no(monkeypatch):
     monkeypatch.setattr(client, "_post", lambda *args: {"job_id": "job-1"})
     monkeypatch.setattr(
         client,
@@ -249,7 +251,7 @@ def test_screenshot_decline_is_reported_without_guessing(monkeypatch):
         client.request_screenshot("laptop")
 
     assert str(declined.value) == (
-        "The person at laptop said no to this screenshot. Nothing was captured. "
+        "The screenshot was not approved on laptop. Nothing was captured. "
         "Do not guess a reason or retry."
     )
 

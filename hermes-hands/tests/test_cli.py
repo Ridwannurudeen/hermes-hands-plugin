@@ -2,6 +2,8 @@ import argparse
 import sys
 import types
 
+import pytest
+
 from hands import cli
 
 
@@ -54,6 +56,11 @@ def test_setup_writes_seed_once_and_owner(monkeypatch, capsys):
     assert "hermes config set terminal.backend hands" in out
     assert "hermes config set bot_desktop.placement gateway" in out
     assert "restart the gateway" in out
+    assert "Optional owner opt-in for witness H help" in out
+    assert "hermes config set plugins.entries.hermes-hands.allow_gateway_injection true" in out
+    assert "quoted device text as a user message" in out
+    assert "starts an agent turn" in out
+    assert "cannot guarantee that the model will avoid tool calls" in out
 
 
 def test_setup_prints_the_backend_and_placement_steps_even_if_the_prompt_is_aborted(
@@ -115,6 +122,7 @@ def run_doctor(capsys, dashboard_url="http://127.0.0.1:9119"):
 def healthy_config():
     return {
         "terminal": {"backend": "hands"},
+        "plugins": {"entries": {"hermes-hands": {"allow_gateway_injection": True}}},
         "dashboard": {
             "public_url": "https://hands.example",
             "basic_auth": {"username": "owner", "password_hash": "scrypt$n=1,r=1,p=1$c2FsdA$aGFzaA"},
@@ -127,7 +135,7 @@ def test_doctor_reports_each_deployment_check(monkeypatch, capsys):
     monkeypatch.setattr(cli.client, "state", lambda: {"relay": True, "devices": [], "alerts": []})
     monkeypatch.setattr(cli.store, "relay_alive", lambda: True)
     lines = run_doctor(capsys)
-    assert len(lines) == 6
+    assert len(lines) == 7
     assert all(line.startswith("PASS ") for line in lines)
     assert [line.split(":")[0] for line in lines] == [
         "PASS terminal.backend is hands",
@@ -136,6 +144,7 @@ def test_doctor_reports_each_deployment_check(monkeypatch, capsys):
         "PASS dashboard.public_url is https or unset",
         "PASS dashboard.basic_auth on the public host",
         "PASS Relay heartbeat row is visible after /local/state",
+        "PASS Witness H help gateway injection is explicitly enabled",
     ]
 
 
@@ -394,7 +403,8 @@ def test_doctor_fails_a_loopback_http_public_url(monkeypatch, capsys):
 
 def test_doctor_honors_env_overrides_for_public_url_and_basic_auth(monkeypatch, capsys):
     """A7: HERMES_DASHBOARD_PUBLIC_URL and HERMES_DASHBOARD_BASIC_AUTH_* override config.yaml."""
-    config = {"terminal": {"backend": "hands"}, "dashboard": {"public_url": "http://broken.example"}}
+    config = healthy_config()
+    config["dashboard"] = {"public_url": "http://broken.example"}
     install_doctor_modules(monkeypatch, config)
     monkeypatch.setattr(cli.client, "state", lambda: {"relay": True})
     monkeypatch.setattr(cli.store, "relay_alive", lambda: True)
@@ -415,3 +425,29 @@ def test_doctor_honors_env_overrides_for_public_url_and_basic_auth(monkeypatch, 
     monkeypatch.setenv("HERMES_DASHBOARD_BASIC_AUTH_SECRET", "too-short")
     rc, lines = run_doctor_rc(capsys)
     assert rc == 1 and lines[4].startswith("FAIL dashboard.basic_auth on the public host:")
+
+
+@pytest.mark.parametrize("permission", [None, False, "true", True], ids=["absent", "false", "string", "true"])
+def test_doctor_requires_explicit_entry_permission_for_witness_help(monkeypatch, capsys, permission):
+    config = healthy_config()
+    entry = config["plugins"]["entries"]["hermes-hands"]
+    if permission is None:
+        entry.pop("allow_gateway_injection")
+    else:
+        entry["allow_gateway_injection"] = permission
+    entry["settings"] = {"allow_gateway_injection": True}
+    install_doctor_modules(monkeypatch, config)
+    monkeypatch.setattr(cli.client, "state", lambda: {"relay": True})
+    monkeypatch.setattr(cli.store, "relay_alive", lambda: True)
+    rc, lines = run_doctor_rc(capsys)
+    help_lines = [line for line in lines if "Witness H help" in line]
+    assert len(help_lines) == 1
+    if permission is True:
+        assert rc == 0
+        assert help_lines[0].startswith("PASS ")
+    else:
+        assert rc == 0
+        assert all(line.startswith("PASS ") for line in lines[:6])
+        assert help_lines[0].startswith("WARN Witness H help is unavailable")
+        assert "hermes config set plugins.entries.hermes-hands.allow_gateway_injection true" in help_lines[0]
+        assert "Optional owner opt-in" in help_lines[0]

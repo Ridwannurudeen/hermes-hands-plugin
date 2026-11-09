@@ -197,7 +197,7 @@ def device_result_error(error: str, device: str) -> str:
     """Turn a final device error code into a fixed model-facing sentence."""
     if error == "screenshot_declined":
         return (
-            f"The person at {device} said no to this screenshot. Nothing was captured. "
+            f"The screenshot was not approved on {device}. Nothing was captured. "
             "Do not guess a reason or retry."
         )
     if error == "stopped_by_person":
