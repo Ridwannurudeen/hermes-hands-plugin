@@ -43,3 +43,5 @@ PYTHONPATH=/path/to/hermes-agent python -m pytest hermes-hands/tests device/test
 Plugin validation reported a safe security scan, matching capabilities, and a clean Desktop SDK surface, with warnings for 15 private-core import sites and in-process dashboard authentication. Plugin doctor passed with three tools and one hook.
 
 A fresh in-process Linux checkup under WSL returned 27 schema-v1 facts, no inferences, and unsupported for an incomplete TEMP scan. This rechecked the fact collector, not the full relay or witness transport. Human Telegram help delivery, screenshot delivery, and the final prompt/transcript changes still need live verification.
+
+On 9 November 2026 from 16:22:41 to 16:24:23 WAT, source candidate `5b6524607810dd0f4b9c79eeb95153a3532171b9` passed a public HTTPS smoke test through `https://hands.gudman.xyz`. A disposable Windows device paired, came online, returned an exact command marker with exit code 0, and returned a schema-v1 checkup with 27 facts. Offline and revoked requests failed closed, and revocation stopped the reconnected agent. This was normal mode; witness, phone, hotspot, Telegram, and screenshots were not tested in that run.

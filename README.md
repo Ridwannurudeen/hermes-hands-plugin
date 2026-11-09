@@ -236,7 +236,9 @@ Live checks on a real Hermes 0.23.0 gateway in WSL and a native Windows 11 lapto
 
 An owner-operated Telegram run confirmed device selection, a checkup report, an approval prompt showing the actual command, and a real file write. Linux under WSL2 passed terminal, byte-exact file I/O, 1 MB output, timeout, checkup transport, interactive witness consent and stop, signed receipt verification, and process-tree revoke. That earlier Linux checkup reported one TEMP-folder fact error. A fresh in-process WSL check on 9 November returned 27 schema-v1 facts with no inferences and marked the incomplete TEMP scan unsupported rather than error. The in-process recheck did not repeat the full Linux relay or witness flow.
 
-Successful help delivery to a chat, screenshot delivery in Telegram, the final prompt-timeout recovery and command-transcript changes, the Desktop pane, and the Windows service installer still need live verification. A public relay deployment alone is not an internet command test. macOS is not a supported device platform.
+A public HTTPS smoke test on 9 November 2026, from 16:22:41 to 16:24:23 WAT, used source candidate `5b6524607810dd0f4b9c79eeb95153a3532171b9`. A disposable Windows device paired with `https://hands.gudman.xyz`, came online, ran a harmless command with the expected marker and exit code 0, and returned a schema-v1 checkup with 27 facts. Offline and revoked device requests failed closed; revocation stopped the reconnected agent. This used normal device mode. It did not test witness mode, Telegram, a phone, a hotspot, or screenshots.
+
+Successful help delivery to a chat, screenshot delivery in Telegram, the final prompt-timeout recovery and command-transcript changes, the Desktop pane, and the Windows service installer still need live verification. macOS is not a supported device platform.
 
 ## Uninstall
 
