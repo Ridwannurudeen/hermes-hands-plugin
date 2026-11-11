@@ -22,6 +22,7 @@ Private core imports that `hermes plugins validate` flags under rule 9:
 - `tools.terminal_tool_lifecycle.get_active_env` (`hands/environment.py`, target change)
 - `agent.redact.redact_approval_display` and `agent.redact.sanitize_command_for_display` (`hands/witness.py`, `_display_problem`)
 - `tools.arg_coercion.coerce_tool_args` (`hands/witness.py`, `_coerced`)
+- `tools.approval_context`: `_approval_session_id` and `_approval_tool_call_id` (`hands/client.py`, finding the running call when Hermes Desktop copies the call context before the tool body runs)
 
 Couplings the static check does not flag:
 
