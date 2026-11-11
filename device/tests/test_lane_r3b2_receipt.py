@@ -31,7 +31,9 @@ def test_deeply_nested_receipt_fails_verification_cleanly(tmp_path):
     path = tmp_path / "receipt.json"
     path.write_text("[" * 100000 + "]" * 100000, encoding="utf-8")
     _, public = generate_keypair()
-    with pytest.raises(receipt.ReceiptError, match="could not read JSON receipt"):
+    # Whether the JSON parser gives up on the nesting depends on the platform and Python build; either way
+    # verification must end in a clean ReceiptError, never a RecursionError or a crash.
+    with pytest.raises(receipt.ReceiptError, match="^(could not read JSON receipt|invalid receipt envelope)$"):
         receipt.verify_receipt(path, public)
 
 

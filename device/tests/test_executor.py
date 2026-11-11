@@ -25,9 +25,12 @@ def test_close_windows_job_accepts_missing_process(monkeypatch, platform):
 def test_process_creation_failure_keeps_original_error(monkeypatch, tmp_path):
     monkeypatch.setattr(executor, "resolve_bash", lambda: "bash")
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    monkeypatch.setattr(executor.subprocess, "Popen", Mock(side_effect=OSError("original launch error")))
+    monkeypatch.setattr(executor, "_send_to_posix_guardian", lambda line, deadline=None: None)
+    popen = Mock(side_effect=OSError("original launch error"))
+    monkeypatch.setattr(executor.subprocess, "Popen", popen)
     with pytest.raises(OSError, match="original launch error"):
         list(executor.run("echo hi"))
+    popen.assert_called_once()
 
 
 def test_windows_cleanup_deadline_closes_stubborn_job(monkeypatch):

@@ -140,7 +140,8 @@ def _host(tmp_path, body):
         "import sys\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {DEVICE_ROOT!r})\n"
-        "from hermeshands_device import executor\n"
+        "from hermeshands_device import executor, keys\n"
+        "keys._keyring = lambda: None\n"
         f"executor.Path.home = lambda: Path({str(tmp_path)!r})\n"
         f"executor.resolve_bash = lambda: {shutil.which('bash')!r}\n"
         + body

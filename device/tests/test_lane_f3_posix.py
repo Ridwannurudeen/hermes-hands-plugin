@@ -142,7 +142,12 @@ class SigtermTerminalTests(unittest.TestCase):
                 self.assertEqual(process.wait(timeout=3), 0, output.decode(errors="replace"))
                 if not stop_key:
                     self.assertIn(b"F3_INTERRUPT_HANDLED", output)
-                self.assertEqual(termios.tcgetattr(slave), previous)
+                # PENDIN is a kernel state bit (macOS sets it when canonical mode returns with input queued), not a setting.
+                pending = getattr(termios, "PENDIN", 0)
+                restored = termios.tcgetattr(slave)
+                restored[3] &= ~pending
+                previous[3] &= ~pending
+                self.assertEqual(restored, previous)
                 receipts = list((home / ".hermes-hands" / "receipts").glob("*.json"))
                 if started:
                     self.assertEqual(len(receipts), 1)
