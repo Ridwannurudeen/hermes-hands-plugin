@@ -641,3 +641,111 @@ def test_signed_device_help_reaches_only_its_saved_owner_origin(rig):
     ]
     assert tool_calls == []
     assert hands.store.get_help_request(device.device_id, "a" * 32)["status"] == "queued"
+
+
+class _WitnessConsole:
+    def __init__(self):
+        self.outputs = []
+
+    def write(self, text):
+        self.outputs.append(text)
+
+    def read_line(self, prompt):
+        threading.Event().wait()
+
+
+def _witness_agent(rig):
+    """The rig's laptop restarted as ``serve --witness`` after the person typed Y."""
+    from hermeshands_device.console import WITNESS_CAPABILITIES
+
+    rig.agent.stop()
+    witness = device_loop.DeviceLoop(transport=rig.transport, console=_WitnessConsole())
+    witness.witness, witness.session_state = True, "active"
+    witness.capabilities = list(WITNESS_CAPABILITIES)
+    witness._request_session_screenshot_consent = lambda: None
+    errors = []
+
+    def serve():
+        try:
+            witness.run_forever()
+        except BaseException as exc:  # recorded: each test asserts how the session ended
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    device_id = rig.hands.store.get_device("laptop")["device_id"]
+    until(
+        lambda: rig.hands.store.device_by_id(device_id)["session_state"] == "active",
+        what="the witness session to reach the relay",
+    )
+    return witness, thread, errors
+
+
+def _approved(rig, env, command, timeout, outcome):
+    """A witness call the hook approved: its decision travels with every job of the call."""
+    def call():
+        rig.hands.client.bind_tool_session(rig.hands.store.device_by_id(rig.hands.store.get_device("laptop")["device_id"]))
+        outcome.update(env.execute(command, timeout=timeout))
+
+    worker = threading.Thread(target=call)
+    worker.start()
+    return worker
+
+
+def test_person_stop_during_a_command_reaches_the_helper_at_once(rig):
+    witness, thread, errors = _witness_agent(rig)
+    env = rig.environment()
+    outcome = {}
+    worker = _approved(rig, env, "sleep 30", 60, outcome)
+    until(lambda: any("sleep 30" in job.get("script", "") for job in rig.delivered), what="the device to get sleep")
+    until(lambda: witness.processes, what="the device to start sleep")
+    pressed = time.monotonic()
+    witness._stop_from_console()  # what S then Enter does on her console
+    worker.join(20)
+    assert time.monotonic() - pressed < 6
+    assert outcome["returncode"] == 130, outcome
+    assert rig.hands.messages.device_result_error("stopped_by_person", "laptop") in outcome["output"]
+    thread.join(10)
+    assert not thread.is_alive() and errors == []
+
+
+def test_job_handed_out_while_stopping_reaches_the_helper_at_once(rig):
+    witness, thread, errors = _witness_agent(rig)
+    env = rig.environment()
+    first = {}
+    _approved(rig, env, "true", 30, first).join(30)
+    assert first["returncode"] == 0, first
+    outcome = {}
+    forwarded = threading.Event()
+
+    def stop_then_forward(request):
+        _approved(rig, env, "echo must not run", 30, outcome)
+        time.sleep(0.3)
+        witness._begin_stopping()  # S lands while this poll is on its way to the relay
+        forwarded.set()
+        return rig.transport.handle_request(request)
+
+    rig.forgeries.append(stop_then_forward)
+    assert forwarded.wait(10)
+    started = time.monotonic()
+    until(lambda: "returncode" in outcome, what="the helper to get a result", timeout=30)
+    assert time.monotonic() - started < 6
+    assert outcome["returncode"] == 130, outcome
+    thread.join(10)
+    assert not thread.is_alive() and errors == []
+
+
+def test_help_with_device_messages_turned_off_reaches_the_person_as_not_sent(rig):
+    rig.context.gateway_injection = False
+    witness, thread, errors = _witness_agent(rig)
+    try:
+        assert witness._send_help_request("my printer will not print") is False
+        assert witness.console.outputs[-1] == "Your helper has not turned on messages, so this was not sent.\n"
+        [event] = [event for event in witness.receipt_events if event["label"] == "Help request"]
+        assert event["delivery_status"] == "not_sent"
+        assert witness.help_request_count == 0
+        assert not witness.connection_lost
+    finally:
+        witness._stop_from_console()
+        thread.join(10)
+    assert errors == []

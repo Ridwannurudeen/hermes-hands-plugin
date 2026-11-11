@@ -114,7 +114,7 @@ function relayDown(state) {
 
 function RelayLine({ state }) {
   if (state.isPending) {
-    return jsx("div", { style: styles.quiet, children: "Checking the relay…" });
+    return jsx("div", { style: styles.quiet, children: "Checking the relay..." });
   }
   const down = relayDown(state);
   const detail = state.isError ? errorText(state.error) : state.data.detail;
@@ -259,12 +259,13 @@ function PairResult({ reply }) {
 
 function PairForm({ sessionId }) {
   const [name, setName] = useState("");
+  const [label, setLabel] = useState("");
   const [reply, setReply] = useState("");
   const [busy, setBusy] = useState(false);
   const pair = async () => {
     setBusy(true);
     try {
-      setReply(await runHands(sessionId, `pair ${shellQuote(name.trim())}`));
+      setReply(await runHands(sessionId, `pair ${shellQuote(name.trim())} --owner-label ${shellQuote(label.trim())}`));
     } catch (error) {
       setReply(errorText(error));
     } finally {
@@ -284,9 +285,15 @@ function PairForm({ sessionId }) {
             disabled: !sessionId,
             onChange: (event) => setName(event.target.value),
           }),
+          jsx(Input, {
+            value: label,
+            placeholder: "your name, shown on the device",
+            disabled: !sessionId,
+            onChange: (event) => setLabel(event.target.value),
+          }),
           jsx(Button, {
             size: "sm",
-            disabled: !sessionId || !name.trim() || busy,
+            disabled: !sessionId || !name.trim() || !label.trim() || busy,
             onClick: pair,
             children: "Pair",
           }),

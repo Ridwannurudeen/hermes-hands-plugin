@@ -48,3 +48,31 @@ def test_freshness_replay_and_canonical_json():
 def test_protocol_implementations_are_byte_identical():
     repo = Path(__file__).parents[2]
     assert (repo / "hermes-hands/hands/protocol.py").read_bytes() == (repo / "device/hermeshands_device/protocol.py").read_bytes()
+
+
+def test_nonce_cache_does_not_scan_unexpired_entries():
+    class NoScanDict(dict):
+        def items(self):
+            raise AssertionError("a request scanned every cached nonce")
+
+        def __iter__(self):
+            raise AssertionError("a request scanned every cached nonce")
+
+    cache = protocol.NonceCache(max_entries=100_000)
+    for index in range(1000):
+        assert cache.check_and_add(str(index), 100)
+    cache._entries = NoScanDict(cache._entries)
+    assert cache.check_and_add("new", 101)
+    assert not cache.check_and_add("new", 102)
+
+
+def test_nonce_cache_expiry_capacity_and_clock_rollback():
+    cache = protocol.NonceCache(ttl=10, max_entries=2)
+    assert cache.check_and_add("later", 100)
+    assert cache.check_and_add("earlier", 95)
+    assert cache.check_and_add("next", 101)
+    assert not cache.check_and_add("later", 102)
+    assert not cache.check_and_add("next", 102)
+    assert not cache.check_and_add("later", 110)
+    assert cache.check_and_add("later", 111)
+    assert not cache.check_and_add("next", 111)

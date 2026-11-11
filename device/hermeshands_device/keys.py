@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -94,8 +95,17 @@ def get_or_create() -> tuple[bytes, bytes]:
                 config.KEY_PATH.unlink(missing_ok=True)
                 raise RuntimeError("could not protect the device key with icacls") from exc
         else:
-            config.KEY_PATH.write_text(value, encoding="utf-8")
-            config.KEY_PATH.chmod(0o600)
+            temp_path = config.ROOT / f".device.{secrets.token_hex(8)}.tmp"
+            fd = os.open(temp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as key_file:
+                    key_file.write(value)
+                    key_file.flush()
+                    os.fsync(key_file.fileno())
+                os.replace(temp_path, config.KEY_PATH)
+            except BaseException:
+                temp_path.unlink(missing_ok=True)
+                raise
     return private, public
 
 

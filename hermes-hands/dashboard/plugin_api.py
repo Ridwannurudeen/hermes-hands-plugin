@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 _PROVIDER = "hermes-hands"
 _NOT_LOADED = "hands: Hermes Hands is not loaded in this process."
+_TOO_LARGE = "hands: this request is too large."
+# Every relay body but an exec job's fits: a result carries a 2 MiB screenshot and a few output chunks.
+MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+# An exec job's script and its stdin are each up to MAX_JOB_TEXT characters, and JSON can spend up to
+# six bytes on one character (a \u00XX escape).
+_EXEC_BODY_CHARS_FACTOR = 2 * 6
 
 
 def _plugin():
@@ -80,7 +86,12 @@ async def _relay_call(request: Request, handler: str, **extra) -> Response:
     if isinstance(served, hands.relay.Reply):
         return _response(served)
     principal = getattr(request.state, "token_principal", None)
-    body = await request.body()
+    limit = MAX_REQUEST_BODY_BYTES
+    if handler == "local_exec" and hands.relay._has(principal, hands.relay.SCOPE_LOCAL):
+        limit += _EXEC_BODY_CHARS_FACTOR * hands.relay.MAX_JOB_TEXT
+    body = await _capped_body(request, limit)
+    if body is None:
+        return JSONResponse({"error": "request_too_large", "detail": _TOO_LARGE}, status_code=413)
     try:
         reply = await getattr(served, handler)(
             principal, request.headers, request.url.path, body, **extra
@@ -100,6 +111,21 @@ def _peer(request: Request) -> str:
     """The client address, as core's auth audit takes it (``request_utils.py:20-27``): the ASGI peer,
     which the server rewrites from X-Forwarded-For only for its trusted proxies."""
     return request.client.host if request.client else ""
+
+
+async def _capped_body(request: Request, limit: int) -> bytes | None:
+    """The request body, or None once it is known to pass ``limit`` bytes (nothing more is read)."""
+    try:
+        if int(request.headers.get("content-length", "0")) > limit:
+            return None
+    except ValueError:
+        return None
+    body = bytearray()
+    async for chunk in request.stream():
+        body += chunk
+        if len(body) > limit:
+            return None
+    return bytes(body)
 
 
 @router.post("/pair")

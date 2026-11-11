@@ -7,14 +7,15 @@ homepage: https://github.com/Ridwannurudeen/hermes-hands-plugin
 description: >
   Help a paired Windows or Linux computer from chat while Hermes stays on a Linux or WSL gateway.
   Optional witness mode requires local consent, prints commands with timestamps, asks before every
-  screenshot, and lets the person stop with S. The gateway asks the helper to approve file operations
-  and commands outside an exact read-only list. Sessions end after 30 minutes with signed receipts.
+  screenshot, and lets the person stop with S. In a witness session the gateway asks the helper to
+  approve every tool call that reaches the device. Sessions end after 30 minutes with signed receipts.
   The device connects out over HTTPS with pinned Ed25519 keys. Offline, revoked, or unreachable
   device targets fail closed. Select it with terminal.backend: hands.
 requires_hermes: ">=0.23.0"
 python_dependencies: []
 provides_tools: [hands_screenshot, hands_devices, hands_checkup]
 provides_hooks: [pre_tool_call]
+provides_middleware: [tool_execution]
 requires_env: []
 config_schema:
   HANDS_RELAY_SEED: {type: secret, env: HANDS_RELAY_SEED, description: "Relay signing seed. Written once by hermes hands setup."}

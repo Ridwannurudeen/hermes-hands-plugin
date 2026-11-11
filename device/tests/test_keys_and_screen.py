@@ -1,5 +1,8 @@
 import os
+import builtins
+import importlib
 import sys
+import tomllib
 import types
 from pathlib import Path
 
@@ -7,6 +10,44 @@ import pytest
 
 from hermeshands_device import config, keys, receipt, screen
 from hermeshands_device.protocol import generate_keypair
+
+
+def test_posix_file_key_is_created_private_before_writing(monkeypatch, tmp_path):
+    monkeypatch.setattr(keys, "_keyring", lambda: None)
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    monkeypatch.setattr(config, "KEY_PATH", tmp_path / "device.json")
+    calls = []
+    real_open = os.open
+
+    def private_open(path, flags, mode=0o777):
+        calls.append((path, flags, mode))
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(keys, "os", types.SimpleNamespace(**{**vars(os), "name": "posix", "open": private_open}))
+    keys.get_or_create()
+    [(path, flags, mode)] = calls
+    assert Path(path).parent == tmp_path and Path(path) != config.KEY_PATH
+    assert (flags, mode) == (os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    assert config.KEY_PATH.exists() and not Path(path).exists()
+
+
+def test_posix_key_write_interrupted_before_the_rename_leaves_no_key_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(keys, "_keyring", lambda: None)
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    monkeypatch.setattr(config, "KEY_PATH", tmp_path / "device.json")
+
+    def full_disk(fd, *args, **kwargs):
+        os.close(fd)
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(keys, "os", types.SimpleNamespace(**{**vars(os), "name": "posix", "fdopen": full_disk}))
+    with pytest.raises(OSError, match="No space left"):
+        keys.get_or_create()
+    assert not config.KEY_PATH.exists()
+    assert list(tmp_path.iterdir()) == []
+    monkeypatch.setattr(keys, "os", types.SimpleNamespace(**{**vars(os), "name": "posix"}))
+    private, public = keys.get_or_create()
+    assert keys.get_or_create() == (private, public)
 
 
 def test_file_key_fallback_is_private_on_posix(monkeypatch, tmp_path):
@@ -163,25 +204,82 @@ def test_screen_requires_explicit_flag():
         screen.capture(allow_screen=False)
 
 
-def test_screen_capture_uses_pillow_png_methods(monkeypatch):
+def test_screenshot_dependencies_are_default_and_loaded_only_for_capture(monkeypatch):
+    project = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text(encoding="utf-8-sig"))["project"]
+    assert "mss>=9,<11" in project["dependencies"]
+    assert "Pillow>=10,<14" in project["dependencies"]
+    assert "screen" not in project["optional-dependencies"]
+    imported = builtins.__import__
+
+    def without_screen(name, *args, **kwargs):
+        if name in ("mss", "PIL"):
+            raise ImportError("screenshot packages are not installed")
+        return imported(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_screen)
+    importlib.reload(screen)
+    with pytest.raises(PermissionError, match="serve --allow-screen"):
+        screen.capture(allow_screen=False)
+    with pytest.raises(RuntimeError, match="Reinstall hermes-hands"):
+        screen.capture(allow_screen=True)
+
+
+class _FakeCapture:
+    monitors = [None, object()]
     shot = types.SimpleNamespace(size=(2, 2), rgb=bytes(12))
 
-    class Capture:
-        monitors = [None, object()]
+    def __enter__(self):
+        return self
 
-        def __enter__(self):
-            return self
+    def __exit__(self, *args):
+        return False
 
-        def __exit__(self, *args):
-            return False
+    def grab(self, monitor):
+        assert monitor is self.monitors[1]
+        return self.shot
 
-        def grab(self, monitor):
-            assert monitor is self.monitors[1]
-            return shot
 
-    monkeypatch.setattr(screen.mss, "mss", Capture)
-    result = screen.capture(allow_screen=True)
-    assert result.startswith(b"\x89PNG\r\n\x1a\n")
+def test_screen_capture_uses_pillow_png_methods(monkeypatch):
+    calls = []
+
+    class Image:
+        @staticmethod
+        def frombytes(mode, size, data):
+            calls.append(("frombytes", mode, size, data))
+            return Image()
+
+        def thumbnail(self, size):
+            calls.append(("thumbnail", size))
+
+        def save(self, output, **kwargs):
+            calls.append(("save", kwargs))
+            output.write(b"\x89PNG\r\n\x1a\nfake")
+
+    monkeypatch.setitem(sys.modules, "mss", types.SimpleNamespace(mss=_FakeCapture))
+    monkeypatch.setitem(sys.modules, "mss.exception", types.SimpleNamespace(ScreenShotError=RuntimeError))
+    monkeypatch.setitem(sys.modules, "PIL", types.SimpleNamespace(Image=Image))
+    monkeypatch.setitem(sys.modules, "PIL.Image", Image)
+
+    assert screen.unavailable() is None
+    assert screen.capture(allow_screen=True) == b"\x89PNG\r\n\x1a\nfake"
+    assert calls == [
+        ("frombytes", "RGB", (2, 2), bytes(12)),
+        ("thumbnail", (screen.MAX_EDGE, screen.MAX_EDGE)),
+        ("save", {"format": "PNG", "optimize": True}),
+    ]
+
+
+def test_screen_capture_encodes_a_real_png_when_the_extra_is_installed(monkeypatch):
+    mss = pytest.importorskip("mss")
+    pytest.importorskip("PIL.Image")
+    monkeypatch.setattr(mss, "mss", _FakeCapture)
+    assert screen.capture(allow_screen=True).startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_screen_reports_unavailable_without_the_extra(monkeypatch):
+    monkeypatch.setitem(sys.modules, "mss", None)
+    monkeypatch.setitem(sys.modules, "PIL", None)
+    assert screen.unavailable() == screen.NOT_INSTALLED
 
 
 def test_receipt_files_are_private_under_the_device_home(monkeypatch, tmp_path):

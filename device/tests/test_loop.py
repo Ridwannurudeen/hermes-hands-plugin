@@ -221,6 +221,7 @@ def test_screenshot_final_result_has_success_code(monkeypatch):
     agent.job_deadlines = {}
     bodies = []
     monkeypatch.setattr(loop.policy, "digest", lambda: "hash")
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
     monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: b"png")
     monkeypatch.setattr(agent, "_post", lambda endpoint, body: bodies.append(body) or httpx.Response(204))
     monkeypatch.setattr(agent, "_verify_response", lambda *args: {})
@@ -248,8 +249,12 @@ class PromptOwner:
         self.requests.append((prompt_id, text, timeout))
         return next(self.answers)
 
+    def notice(self, text):
+        self.requests.append(("notice", text, None))
 
-def _screenshot_agent(owner):
+
+def _screenshot_agent(owner, monkeypatch):
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
     agent = object.__new__(loop.DeviceLoop)
     agent.allow_screen = True
     agent.console_owner = owner
@@ -273,7 +278,7 @@ def _screenshot_agent(owner):
 @pytest.mark.parametrize("answer", ["Y", "y"])
 def test_each_screenshot_request_requires_its_own_consent(monkeypatch, answer):
     owner = PromptOwner([answer, "N"])
-    agent = _screenshot_agent(owner)
+    agent = _screenshot_agent(owner, monkeypatch)
     captures, posted = [], []
     monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: captures.append(kwargs) or b"png")
     monkeypatch.setattr(agent, "_result", lambda job_id, seq, **kwargs: posted.append((job_id, kwargs)))
@@ -282,8 +287,8 @@ def test_each_screenshot_request_requires_its_own_consent(monkeypatch, answer):
     agent._run_job({"job_id": "screen-two", "type": "screenshot"})
 
     assert owner.requests == [
-        ("witness-instance-screenshot-screen-one", "Allow this screenshot?", 30),
-        ("witness-instance-screenshot-screen-two", "Allow this screenshot?", 30),
+        ("witness-instance-screenshot-screen-one", "Your helper asks to see your screen. Allow this one screenshot?", 30),
+        ("witness-instance-screenshot-screen-two", "Your helper asks to see your screen. Allow this one screenshot?", 30),
     ]
     assert captures == [{"allow_screen": True}]
     assert posted == [
@@ -295,20 +300,59 @@ def test_each_screenshot_request_requires_its_own_consent(monkeypatch, answer):
 @pytest.mark.parametrize("answer", [None, "", "n", "N", "yes", "ok"])
 def test_screenshot_timeout_eof_and_non_y_decline(monkeypatch, answer):
     owner = PromptOwner([answer])
-    agent = _screenshot_agent(owner)
+    agent = _screenshot_agent(owner, monkeypatch)
     posted = []
     monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: pytest.fail("declined screenshot was captured"))
     monkeypatch.setattr(agent, "_result", lambda job_id, seq, **kwargs: posted.append(kwargs))
 
     agent._run_job({"job_id": "screen", "type": "screenshot"})
 
-    assert owner.requests == [("witness-instance-screenshot-screen", "Allow this screenshot?", 30)]
-    assert posted == [{"done": True, "returncode": 126, "error": "screenshot_declined"}]
+    assert owner.requests == [("witness-instance-screenshot-screen", "Your helper asks to see your screen. Allow this one screenshot?", 30)]
+    expected = "screenshot_timeout" if answer is None else "screenshot_declined"
+    assert posted == [{"done": True, "returncode": 126, "error": expected}]
+
+
+def test_screenshot_timeout_is_distinct_from_explicit_refusal(monkeypatch):
+    agent = _screenshot_agent(PromptOwner([None, "N"]), monkeypatch)
+    posted = []
+    monkeypatch.setattr(agent, "_result", lambda job_id, seq, **values: posted.append(values))
+    monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: pytest.fail("unapproved capture"))
+    for job_id in ("timeout", "refusal"):
+        agent._run_job({"job_id": job_id, "type": "screenshot"})
+    assert [result["error"] for result in posted] == ["screenshot_timeout", "screenshot_declined"]
+
+
+def test_screenshot_question_names_the_helper_without_lowercasing_the_name(monkeypatch):
+    owner = PromptOwner(["N"])
+    agent = _screenshot_agent(owner, monkeypatch)
+    monkeypatch.setattr(config, "load", lambda: {"owner_label": "McKay"})
+    monkeypatch.setattr(agent, "_result", lambda *args, **kwargs: None)
+    agent._run_job({"job_id": "screen", "type": "screenshot"})
+    assert owner.requests[0][1] == "McKay asks to see your screen. Allow this one screenshot?"
+
+
+def test_screenshot_permission_uses_session_identity_when_witness_flag_is_cleared(monkeypatch):
+    owner = PromptOwner([])
+    agent = _screenshot_agent(owner, monkeypatch)
+    agent.session_started_at = "2026-11-11T10:00:00Z"
+    agent.witness = False
+    agent.allow_screen = False
+    agent.screen_session_answered = False
+    posted = []
+    monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: pytest.fail("unapproved capture"))
+    monkeypatch.setattr(agent, "_result", lambda job_id, seq, **values: posted.append(values))
+
+    agent._run_job({"job_id": "screen", "type": "screenshot"})
+
+    assert not agent._is_stopping()
+    assert not agent.stop_event.is_set()
+    assert owner.requests == []
+    assert posted == [{"done": True, "returncode": 126, "error": "screenshot_pending"}]
 
 
 def test_stop_during_screenshot_prompt_returns_stopped_result(monkeypatch):
     owner = PromptOwner([None])
-    agent = _screenshot_agent(owner)
+    agent = _screenshot_agent(owner, monkeypatch)
     posted = []
 
     def stop_prompt(*args, **kwargs):
@@ -325,7 +369,7 @@ def test_stop_during_screenshot_prompt_returns_stopped_result(monkeypatch):
 
 
 def test_expired_witness_deadline_refuses_a_new_job(monkeypatch):
-    agent = _screenshot_agent(PromptOwner([]))
+    agent = _screenshot_agent(PromptOwner([]), monkeypatch)
     agent.session_deadline = time.monotonic() - 1
     posted = []
     monkeypatch.setattr(agent, "_result", lambda job_id, seq, **kwargs: posted.append(kwargs))
@@ -371,7 +415,7 @@ def test_witness_deadline_wakes_after_poll_and_refuses_late_job(monkeypatch, tmp
 
     assert agent.session_deadline == 1900.0
     assert poll_calls
-    assert launched == []
+    assert launched == [{"job_id": "late", "type": "exec"}]
     assert agent.stop_reason == "session_timeout"
     assert agent.session_state == "stopped"
 
@@ -420,7 +464,7 @@ def test_console_stop_cancels_registered_process_tree(monkeypatch):
     terminated = []
     job_termination_calls = []
     monkeypatch.setattr(loop.executor, "_terminate", lambda proc, started: terminated.append((proc, started)))
-    monkeypatch.setattr(loop.executor, "_terminate_windows_jobs", lambda: job_termination_calls.append(True))
+    monkeypatch.setattr(loop.executor, "_terminate_windows_jobs", lambda deadline=None: job_termination_calls.append(deadline))
 
     try:
         agent.console_owner.on_stop()
@@ -429,6 +473,7 @@ def test_console_stop_cancels_registered_process_tree(monkeypatch):
         assert agent.stop_event.is_set()
         assert terminated == [(process, 123.0)]
         assert job_termination_calls
+        assert set(job_termination_calls) == {agent.stop_flush_deadline}
     finally:
         agent.client.close()
 
@@ -440,6 +485,7 @@ def test_console_stop_cancels_registered_process_tree(monkeypatch):
 def test_session_screenshot_consent_requires_explicit_y(monkeypatch, answer, expected):
     private, public = generate_keypair()
     monkeypatch.setattr(loop, "get_or_create", lambda: (private, public))
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
 
     class InputConsole:
         def __init__(self):
@@ -454,17 +500,24 @@ def test_session_screenshot_consent_requires_explicit_y(monkeypatch, answer, exp
             return self.lines.get()
 
     console = InputConsole()
+    if answer in ("yes", "ok"):
+        console.lines.put("N")
     agent = loop.DeviceLoop(console=console)
     agent.witness = True
     agent.session_state = "active"
     consent = threading.Thread(target=agent._request_session_screenshot_consent)
-    consent.start()
-    consent.join(1)
-    assert not consent.is_alive()
-
-    agent.console_owner.close()
-    console.lines.put(None)
-    agent.console_owner.join(1)
+    try:
+        consent.start()
+        consent.join(1)
+        assert not consent.is_alive()
+        if answer in ("yes", "ok"):
+            assert "Please type Y or N" in "".join(console.outputs)
+    finally:
+        agent.console_owner.close()
+        console.lines.put(None)
+        agent.console_owner.join(1)
+        consent.join(1)
+        agent.client.close()
     assert agent.allow_screen is expected
 
 
@@ -472,6 +525,7 @@ def test_session_screenshot_consent_requires_explicit_y(monkeypatch, answer, exp
 def test_stop_or_eof_during_session_screenshot_consent_stops_witness(monkeypatch, answer):
     private, public = generate_keypair()
     monkeypatch.setattr(loop, "get_or_create", lambda: (private, public))
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
 
     class InputConsole:
         def __init__(self):
@@ -502,6 +556,7 @@ def test_stop_or_eof_during_session_screenshot_consent_stops_witness(monkeypatch
 def test_poll_and_heartbeat_continue_while_console_prompt_is_open(monkeypatch, tmp_path):
     private, public = generate_keypair()
     monkeypatch.setattr(loop, "get_or_create", lambda: (private, public))
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
     monkeypatch.setattr(loop.Path, "home", lambda: tmp_path)
     monkeypatch.setattr(loop.executor, "reap_recorded_processes", lambda: None)
 
@@ -879,9 +934,9 @@ def test_signed_unknown_device_kills_background_child_after_shell_exit(monkeypat
         terminate_calls = []
         terminate_jobs = loop.executor._terminate_windows_jobs
 
-        def track_termination():
+        def track_termination(deadline=None):
             terminate_calls.append(tuple(loop.executor._WINDOWS_JOBS))
-            terminate_jobs()
+            terminate_jobs(deadline)
 
         monkeypatch.setattr(loop.executor, "_terminate_windows_jobs", track_termination)
         cancel_all = agent._cancel_all
@@ -1476,6 +1531,7 @@ def test_result_reply_cancel_terminates_registered_job(monkeypatch):
     agent.job_deadlines = {}
     terminated = []
     monkeypatch.setattr(loop.executor, "_terminate", lambda proc, started: terminated.append((proc, started)))
+    monkeypatch.setattr(loop.executor, "_leader_running", lambda proc, started: proc.poll() is None)
     monkeypatch.setattr(agent, "_post", lambda *args: httpx.Response(200))
     monkeypatch.setattr(agent, "_verify_response", lambda *args: {"ok": True, "cancel": True})
     try:
@@ -1522,6 +1578,7 @@ def test_loop_sends_output_read_after_exit_with_done(monkeypatch):
         yield b"exit"
         on_exit(3)
 
+    monkeypatch.setattr(loop.executor, "_leader_running", lambda proc, started: proc.poll() is None)
     monkeypatch.setattr(loop.policy, "refusal", lambda script, deny=None: None)
     monkeypatch.setattr(loop.policy, "snapshot", lambda: ("hash", loop.policy.DEFAULTS.copy()))
     agent.accepted_policy_hash = "hash"
@@ -1547,6 +1604,7 @@ def test_loop_flushes_held_output_before_executor_error(monkeypatch):
         yield b"held output"
         raise RuntimeError("executor failed")
 
+    monkeypatch.setattr(loop.executor, "_leader_running", lambda proc, started: proc.poll() is None)
     monkeypatch.setattr(loop.policy, "refusal", lambda script, deny=None: None)
     monkeypatch.setattr(loop.policy, "snapshot", lambda: ("hash", loop.policy.DEFAULTS.copy()))
     agent.accepted_policy_hash = "hash"
@@ -2097,7 +2155,7 @@ def test_stop_flush_writes_local_receipt_and_sends_stopped_heartbeat(
             "timestamp": "2026-11-08T10:02:00Z",
             "label": "Help request",
             "outcome": "Accepted by relay",
-            "delivery_status": "pending",
+            "delivery_status": "accepted",
             "request_id": "a" * 32,
         },
     ]
@@ -2133,9 +2191,16 @@ def test_stop_flush_writes_local_receipt_and_sends_stopped_heartbeat(
     assert saved["shutdown_delivery"] == expected_delivery
     assert saved["events"][-1]["label"] == "Session stopped"
     assert saved["events"][-1]["delivery_status"] == expected_delivery
-    assert saved["events"][1]["delivery_status"] == "pending"
+    assert saved["events"][1]["delivery_status"] == "accepted"
     assert "Running a command: Completed with exit code 0" in text_file.read_text(encoding="utf-8-sig")
-    assert "Help request: Accepted by relay (delivery: pending)" in text_file.read_text(encoding="utf-8-sig")
+    assert "Help request: sent" in text_file.read_text(encoding="utf-8-sig")
+    expected_end = (
+        "Your 30 minute session has ended. Nothing else will run."
+        if stop_reason == "session_timeout" else
+        "Session stopped. Nothing else will run on this computer."
+    )
+    console_text = "".join(agent.console.outputs)
+    assert console_text.index(expected_end) < console_text.index(str(text_file))
     assert "private-command" not in receipt_file.read_text(encoding="utf-8-sig")
     assert "private-output" not in receipt_file.read_text(encoding="utf-8-sig")
     assert any(str(text_file) in output for output in agent.console.outputs)
@@ -2170,6 +2235,7 @@ def test_stopping_job_reports_observed_output_and_stopped_result(monkeypatch):
         yield b"during stop"
         on_exit(-9)
 
+    monkeypatch.setattr(loop.executor, "_leader_running", lambda proc, started: proc.poll() is None)
     monkeypatch.setattr(loop.executor, "run", run)
 
     agent._run_job({"job_id": "stopped", "type": "exec", "script": "echo output"})
@@ -2181,23 +2247,29 @@ def test_stopping_job_reports_observed_output_and_stopped_result(monkeypatch):
     ]
 
 
-def test_job_returned_after_stop_is_refused_without_execution(monkeypatch):
-    agent = object.__new__(loop.DeviceLoop)
-    agent.accepted_policy_hash = "hash"
-    agent.processes = {}
-    agent.running = {}
-    agent.cancelled_jobs = set()
-    agent.job_deadlines = {}
-    agent.job_start_events = {}
-    agent.process_lock = threading.Lock()
-    agent.stop_event = threading.Event()
-    agent.stop_event.set()
-    agent.session_state = "stopping"
+def test_job_returned_after_stop_is_refused_without_execution(monkeypatch, tmp_path):
+    _, agent = _signed_poll(monkeypatch)
+    monkeypatch.setattr(loop.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(loop.executor, "reap_recorded_processes", lambda: None)
+    monkeypatch.setattr(agent, "_heartbeat_loop", lambda: None)
     posted = []
     monkeypatch.setattr(agent, "_result", lambda job_id, seq, **values: posted.append(values))
     monkeypatch.setattr(loop.executor, "run", lambda *args, **kwargs: pytest.fail("raced job executed"))
 
-    agent._run_job({"job_id": "raced", "type": "exec", "script": "echo must not run"})
+    def post(endpoint, body):
+        if endpoint == "/device/poll":
+            agent._begin_stopping()
+            return httpx.Response(200)
+        return httpx.Response(204)
+
+    monkeypatch.setattr(agent, "_post", post)
+    monkeypatch.setattr(agent, "_verify_response", lambda response, endpoint:
+                        {"job_id": "raced", "type": "exec", "script": "echo must not run"}
+                        if endpoint == "/device/poll" else {})
+    try:
+        agent.run_forever()
+    finally:
+        agent.client.close()
 
     assert posted == [{"done": True, "returncode": 130, "error": "stopped_by_person"}]
 
@@ -2333,8 +2405,8 @@ def test_checkup_job_returns_only_the_compiled_checkup(monkeypatch):
     assert agent.receipt_events[-1]["checkup"] == result
     console_output = "".join(agent.console.outputs)
     assert console_output == (
-        "[2026-11-09T00:00:00Z] System checkup: Started\n"
-        "[2026-11-08T00:00:00Z] System checkup: Completed\n"
+        f"[{loop.receipt._local_time('2026-11-09T00:00:00Z')}] System checkup: Started\n"
+        f"[{loop.receipt._local_time('2026-11-08T00:00:00Z')}] System checkup: Completed\n"
     )
     assert console_output.index("System checkup") < console_output.index("Completed")
 
@@ -2374,9 +2446,9 @@ def test_unknown_or_malformed_jobs_are_refused_and_recorded(monkeypatch, job):
             {"done": True, "returncode": 126, "error": "unknown_job_type"},
         )
     ]
-    assert agent.receipt_events[0]["outcome"] == "Refused: unknown_job_type"
+    assert agent.receipt_events[0]["outcome"] == "Refused: unknown request"
     assert agent.console.outputs == [
-        "[2026-11-09T00:00:00Z] Unknown job type: Refused: unknown_job_type\n"
+        f"[{loop.receipt._local_time('2026-11-09T00:00:00Z')}] Unknown job type: Refused: unknown request\n"
     ]
 
 
@@ -2411,8 +2483,8 @@ def _transcript_agent():
     ("job_id", "script", "file_op", "expected_command"),
     [
         ("exec-transcript", _core_wrapped("ls /mnt/c/Users"), False, "ls /mnt/c/Users"),
-        ("read-transcript", "  cat /mnt/c/Users/gudma/notes.txt  ", True, "cat /mnt/c/Users/gudma/notes.txt"),
-        ("write-transcript", "  printf '%s' hello > /mnt/c/Users/gudma/notes.txt  ", True, "printf '%s' hello > /mnt/c/Users/gudma/notes.txt"),
+        ("read-transcript", "  cat /mnt/c/Users/me/notes.txt  ", True, "cat /mnt/c/Users/me/notes.txt"),
+        ("write-transcript", "  printf '%s' hello > /mnt/c/Users/me/notes.txt  ", True, "printf '%s' hello > /mnt/c/Users/me/notes.txt"),
         ("patch-transcript", "  python -c 'print(\"patch\")'  ", True, "python -c 'print(\"patch\")'"),
     ],
 )
@@ -2432,7 +2504,7 @@ def test_exec_and_file_operation_jobs_print_and_record_command_transcripts(
 
     def run(*args, on_start, on_exit, **kwargs):
         assert agent.console.outputs == [
-            f"[2026-11-09T00:00:01Z] Running a command: {expected_command}\n"
+            f"[{loop.receipt._local_time('2026-11-09T00:00:01Z')}] Running a command: {expected_command}\n"
         ]
         on_start(Process(), 1.0)
         on_exit(0)
@@ -2443,8 +2515,8 @@ def test_exec_and_file_operation_jobs_print_and_record_command_transcripts(
     agent._run_job({"job_id": job_id, "type": "exec", "script": script, "file_op": file_op})
 
     assert agent.console.outputs == [
-        f"[2026-11-09T00:00:01Z] Running a command: {expected_command}\n",
-        "[2026-11-09T00:00:02Z] Running a command: Completed with exit code 0\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:01Z')}] Running a command: {expected_command}\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:02Z')}] Running a command: Completed with exit code 0\n",
     ]
     assert [event["label"] for event in agent.receipt_events] == [
         "Running a command",
@@ -2470,11 +2542,12 @@ def test_exec_and_file_operation_jobs_print_and_record_command_transcripts(
         private,
         public,
     )
-    saved = loop.receipt.verify_receipt(paths[0])
+    saved = loop.receipt.verify_receipt(paths[0], public)
     assert saved["events"][0]["outcome"] == expected_command
     receipt_text = paths[1].read_text(encoding="utf-8-sig")
-    assert f"[2026-11-09T00:00:01Z] Running a command: {expected_command}" in receipt_text
-    assert "[2026-11-09T00:00:02Z] Running a command: Completed with exit code 0" in receipt_text
+    local_time = loop.datetime.fromisoformat("2026-11-09T00:00:01+00:00").astimezone().strftime("%Y-%m-%d %H:%M")
+    assert f"[{local_time}] Running a command: {expected_command}" in receipt_text
+    assert f"[{local_time}] Running a command: Completed with exit code 0" in receipt_text
 
 
 def test_screenshot_job_prints_and_records_request_and_outcome(monkeypatch):
@@ -2482,14 +2555,15 @@ def test_screenshot_job_prints_and_records_request_and_outcome(monkeypatch):
     agent.console_owner = PromptOwner(["y"])
     timestamps = iter(("2026-11-09T00:00:01Z", "2026-11-09T00:00:02Z"))
     monkeypatch.setattr(loop, "_utc_timestamp", lambda: next(timestamps))
+    monkeypatch.setattr(loop.screen, "unavailable", lambda: None)
     monkeypatch.setattr(loop.screen, "capture", lambda **kwargs: b"png")
     monkeypatch.setattr(agent, "_result", lambda *args, **kwargs: None)
 
     agent._run_job({"job_id": "screenshot-transcript", "type": "screenshot"})
 
     assert agent.console.outputs == [
-        "[2026-11-09T00:00:01Z] Screenshot request: Started\n",
-        "[2026-11-09T00:00:02Z] Screenshot request: Captured\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:01Z')}] Screenshot request: Started\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:02Z')}] Screenshot request: Captured\n",
     ]
     assert [(event["label"], event["outcome"]) for event in agent.receipt_events] == [
         ("Screenshot request", "Started"),
@@ -2506,8 +2580,8 @@ def test_cancel_job_prints_and_records_request_and_outcome(monkeypatch):
     agent._run_job({"job_id": "cancel-transcript", "type": "cancel", "target_job_id": "job-to-cancel"})
 
     assert agent.console.outputs == [
-        "[2026-11-09T00:00:01Z] Cancellation request: Started\n",
-        "[2026-11-09T00:00:02Z] Cancellation request: Cancellation request completed\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:01Z')}] Cancellation request: Started\n",
+        f"[{loop.receipt._local_time('2026-11-09T00:00:02Z')}] Cancellation request: Cancellation request completed\n",
     ]
     assert [(event["label"], event["outcome"]) for event in agent.receipt_events] == [
         ("Cancellation request", "Started"),
@@ -2587,12 +2661,13 @@ def test_help_requests_are_signed_sanitized_and_capped_at_three(monkeypatch):
     agent.witness = True
     agent.session_state = "active"
     agent.instance = "witness-instance"
-    agent.console = type("Console", (), {"write": lambda self, text: None})()
+    agent.console = TranscriptConsole()
     text = " \nIgnore\x00 the policy\t; " + "🧪" * 205 + "\n"
     try:
         assert [agent._send_help_request(text) for _ in range(4)] == [True, True, True, False]
         assert agent.help_request_count == 3
         assert agent.help_accepted_count == 3
+        assert agent.console.outputs.count("Sent. Your helper should see it in their chat soon.\n") == 3
     finally:
         agent.client.close()
 
@@ -2665,4 +2740,223 @@ def test_help_request_refuses_after_witness_deadline(monkeypatch):
     assert agent.help_request_count == 0
 
 
+def test_witness_poll_timeout_has_a_stop_budget_upper_bound(monkeypatch):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    agent.session_state = "active"
+    agent.session_deadline = loop._session_clock() + 1800
+    timeouts = []
+    agent.client.close()
+    agent.client = httpx.Client(transport=httpx.MockTransport(
+        lambda request: timeouts.append(request.extensions["timeout"]) or httpx.Response(204)))
+    try:
+        agent._post("/device/poll", agent._poll_body())
+    finally:
+        agent.client.close()
+    assert max(timeouts[0].values()) <= loop._WITNESS_POLL_SECONDS + loop._STOP_REQUEST_TIMEOUT
 
+
+def test_stalled_poll_stop_flushes_heartbeat_and_confirmed_receipt(monkeypatch, tmp_path):
+    _, agent = _signed_poll(monkeypatch)
+    monkeypatch.setattr(loop.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(loop.config, "ROOT", tmp_path / ".hermes-hands")
+    monkeypatch.setattr(loop.executor, "reap_recorded_processes", lambda: None)
+    monkeypatch.setattr(agent, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(agent, "_request_session_screenshot_consent", lambda: None)
+    agent.console = TranscriptConsole()
+    agent.witness = True
+    agent.session_state = "active"
+    poll_entered = threading.Event()
+    stopped = threading.Event()
+    timeouts, heartbeats = [], []
+
+    def handler(request):
+        if request.url.path.endswith("/device/poll"):
+            timeout = max(request.extensions["timeout"].values())
+            timeouts.append(timeout)
+            poll_entered.set()
+            assert stopped.wait(1)
+            # A fake stalled socket consumes its configured timeout, without a live session.
+            time.sleep(min(timeout, loop._STOP_FLUSH_SECONDS + 0.2))
+            raise httpx.ReadTimeout("stalled", request=request)
+        heartbeats.append(json.loads(request.content))
+        return httpx.Response(204, request=request)
+
+    agent.client.close()
+    agent.client = httpx.Client(transport=httpx.MockTransport(handler), trust_env=False)
+    errors = []
+
+    def serve():
+        try:
+            agent.run_forever()
+        except Exception as exc:
+            errors.append(exc)
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        assert poll_entered.wait(1)
+        started = time.monotonic()
+        agent._stop_from_console()
+        stopped.set()
+        thread.join(loop._STOP_FLUSH_SECONDS + 1)
+        elapsed = time.monotonic() - started
+        assert not thread.is_alive()
+        assert errors == []
+        assert elapsed < loop._STOP_FLUSH_SECONDS
+        assert timeouts[0] <= loop._WITNESS_POLL_SECONDS + loop._STOP_REQUEST_TIMEOUT
+        assert heartbeats[-1]["session_state"] == "stopped"
+        saved = json.loads(next((tmp_path / ".hermes-hands" / "receipts").glob("*.json")).read_text(encoding="utf-8-sig"))
+        assert saved["payload"]["shutdown_delivery"] == "confirmed"
+    finally:
+        stopped.set()
+        thread.join(1)
+        agent.client.close()
+
+
+@pytest.mark.parametrize("failure", [httpx.ConnectError("offline"), PermissionError("owner_origin_required")])
+def test_failed_help_does_not_spend_quota(monkeypatch, failure):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    agent.session_state = "active"
+    agent.console = TranscriptConsole()
+    monkeypatch.setattr(agent, "_post", lambda *args: (_ for _ in ()).throw(failure))
+    try:
+        for _ in range(4):
+            assert agent._send_help_request("Please help") is False
+        assert agent.help_request_count == 0
+        assert agent.help_accepted_count == 0
+        if isinstance(failure, httpx.HTTPError):
+            assert agent.console.outputs == [
+                "Your message was not sent. Check the internet and try H again.\n"
+            ] * 4
+    finally:
+        agent.client.close()
+
+
+def test_job_transcript_strips_terminal_controls_and_bounds_command_memory(monkeypatch):
+    agent = _transcript_agent()
+    monkeypatch.setattr(loop.policy, "snapshot", lambda: ("hash", []))
+    monkeypatch.setattr(loop.policy, "refusal", lambda *args: None)
+    monkeypatch.setattr(loop.executor, "run", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr(agent, "_result", lambda *args, **kwargs: None)
+    agent._run_job({"job_id": "unsafe", "type": "exec", "script": "echo \x1b[1A\x1b[2K\u202e\ud800" + "x" * 5000})
+    command = agent.receipt_events[0]["outcome"]
+    assert len(command) <= 2000
+    assert "characters not shown" in command
+    assert command.endswith("x" * 900)
+    assert "\x1b" not in command and "[1A" not in command and "\u202e" not in command and "\ud800" not in command
+    assert all("\x1b" not in text and "\u202e" not in text for text in agent.console.outputs)
+
+
+def test_session_clock_counts_suspend_when_boot_clock_exists(monkeypatch):
+    agent = _screenshot_agent(PromptOwner([]), monkeypatch)
+    agent.session_deadline = 1900
+    monkeypatch.setattr(loop.time, "CLOCK_BOOTTIME", 7, raising=False)
+    monkeypatch.setattr(loop.time, "clock_gettime", lambda clock: 1901 if clock == 7 else 100, raising=False)
+    monkeypatch.setattr(loop.time, "monotonic", lambda: 100)
+    assert agent._expire_session_if_due()
+    assert agent.stop_reason == "session_timeout"
+
+
+@pytest.mark.parametrize("via_result", [True, False])
+def test_cancel_cache_keeps_latest_target_at_capacity(monkeypatch, via_result):
+    agent = _transcript_agent()
+
+    class Cancelled(set):
+        def pop(self):
+            return self.remove("intended-target")
+
+    agent.cancelled_jobs = Cancelled(str(index) for index in range(1024))
+    monkeypatch.setattr(agent, "_post", lambda *args: httpx.Response(200))
+    monkeypatch.setattr(agent, "_verify_response", lambda *args: {"cancel": True})
+    if via_result:
+        with pytest.raises(InterruptedError):
+            agent._result("intended-target", 0)
+    else:
+        monkeypatch.setattr(agent, "_result", lambda *args, **kwargs: None)
+        agent._run_job({"job_id": "cancel-request", "type": "cancel", "target_job_id": "intended-target"})
+    assert "intended-target" in agent.cancelled_jobs
+    assert len(agent.cancelled_jobs) == 1024
+
+
+def test_cleanup_error_still_writes_receipt(monkeypatch, tmp_path):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    agent.session_state = "active"
+    agent.session_started_at = "2026-11-11T10:00:00Z"
+    agent.console = TranscriptConsole()
+    monkeypatch.setattr(loop.config, "ROOT", tmp_path)
+    monkeypatch.setattr(agent, "_cancel_running_jobs", lambda: (_ for _ in ()).throw(OSError("cleanup failed")))
+    monkeypatch.setattr(agent, "_post", lambda *args: httpx.Response(204))
+    monkeypatch.setattr(agent, "_verify_response", lambda *args: {})
+    try:
+        agent._stop_and_flush()
+        saved = json.loads(next((tmp_path / "receipts").glob("*.json")).read_text(encoding="utf-8-sig"))
+        assert saved["payload"]["shutdown_delivery"] == "confirmed"
+        assert "Session stopped. Nothing else will run on this computer." in "".join(agent.console.outputs)
+    finally:
+        agent.client.close()
+
+
+def test_connection_loss_and_recovery_print_once_through_console_notice(monkeypatch, tmp_path):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    agent.session_state = "active"
+    agent.console = TranscriptConsole()
+    monkeypatch.setattr(loop.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(loop.executor, "reap_recorded_processes", lambda: None)
+    monkeypatch.setattr(agent, "_heartbeat_loop", lambda: None)
+    monkeypatch.setattr(agent, "_request_session_screenshot_consent", lambda: None)
+    monkeypatch.setattr(agent, "_retry", lambda *args, **kwargs: None)
+    notices = []
+    monkeypatch.setattr(agent.console_owner, "notice", notices.append, raising=False)
+    attempts = []
+
+    def post(endpoint, body):
+        attempts.append(endpoint)
+        if len(attempts) <= 2:
+            raise httpx.ConnectError("offline")
+        if len(attempts) == 4:
+            agent.stop_event.set()
+        return httpx.Response(204)
+
+    monkeypatch.setattr(agent, "_post", post)
+    monkeypatch.setattr(agent, "_verify_response", lambda *args: {})
+    try:
+        agent.run_forever()
+    finally:
+        agent.client.close()
+    assert notices == [
+        "Lost connection to your helper. Trying again. Type S and press Enter to stop.",
+        "Connected to your helper again.",
+    ]
+
+
+def test_clock_skew_status_prints_plain_connection_notice_once(monkeypatch):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    notices = []
+    monkeypatch.setattr(agent.console_owner, "notice", notices.append, raising=False)
+    try:
+        agent._transient_status(401)
+        agent._transient_status(401)
+    finally:
+        agent.client.close()
+    assert notices == ["Lost connection to your helper. Trying again. Type S and press Enter to stop."]
+
+
+def test_ambiguous_help_response_uses_quota_and_records_pending_delivery(monkeypatch):
+    _, agent = _signed_poll(monkeypatch)
+    agent.witness = True
+    agent.session_state = "active"
+    agent.console = TranscriptConsole()
+    monkeypatch.setattr(agent, "_post", lambda *args: (_ for _ in ()).throw(httpx.ReadTimeout("lost response")))
+    try:
+        assert agent._send_help_request("Please help") is False
+        assert agent.help_request_count == 1
+        assert agent.help_accepted_count == 0
+        assert agent.receipt_events[-1]["delivery_status"] == "pending"
+        assert agent.console.outputs == ["Your message may not have reached your helper.\n"]
+    finally:
+        agent.client.close()

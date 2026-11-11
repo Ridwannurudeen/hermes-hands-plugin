@@ -66,7 +66,7 @@ class Device:
         self,
         name: str = "laptop",
         policy_hash: str = "p0",
-        home: str = "C:\\Users\\ridwan",
+        home: str = "C:\\Users\\person",
         device_os: str = "Windows-11-10.0.26300-SP0",
     ):
         self.name = name
@@ -171,9 +171,13 @@ class RegisterCtx:
     def __init__(self):
         self.config = {}
         self.calls = []
+        self.gateway_injection = True  # plugins.entries.hermes-hands.allow_gateway_injection
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
+
+    def _gateway_injection_allowed(self) -> bool:
+        return self.gateway_injection
 
     def current_cron_execution(self):
         return None
@@ -189,6 +193,9 @@ class RegisterCtx:
 
     def register_command(self, name, handler, **kwargs):
         self.calls.append(("command", name))
+
+    def register_middleware(self, name, fn):
+        self.calls.append(("middleware", name))
 
     def register_cli_command(self, name, *args, **kwargs):
         self.calls.append(("cli", name))

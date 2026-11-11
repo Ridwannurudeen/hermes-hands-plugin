@@ -86,6 +86,13 @@ def run_terminal(env, command, *, workdir=None):
 
 
 @pytest.fixture(autouse=True)
+def isolated_hermes_home(monkeypatch, tmp_path_factory):
+    """Core's process registry writes processes.json and process results under the Hermes home
+    it resolves at call time (process_registry.py:52-57, process_registry_results.py:59)."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.mktemp("hermes-home")))
+
+
+@pytest.fixture(autouse=True)
 def fresh_session_cwds():
     """Each test is its own process as far as the per-container cwd memory goes."""
     environment._SESSION_CWDS.clear()
@@ -572,8 +579,12 @@ def test_cron_runs_on_the_server(laptop):
 
 
 def test_witness_uses_environment_owner_target_not_tool_target_arguments(laptop, monkeypatch):
-    from hands import witness
+    import contextvars
 
+    from hands import client, witness
+
+    # The hook freezes the device session it saw (client.bind_tool_session); keep it in this test.
+    monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("tool_session", default=None))
     ctx = Ctx()
     store.set_session_target("s1", "laptop", "telegram:42")
     monkeypatch.setattr(
@@ -584,6 +595,8 @@ def test_witness_uses_environment_owner_target_not_tool_target_arguments(laptop,
         assert device_id == "device-id"
         return {
             "name": "laptop",
+            "device_id": "device-id",
+            "instance": "serve-1",
             "witness": True,
             "session_state": "active",
             "capabilities": ["witness-v1"],

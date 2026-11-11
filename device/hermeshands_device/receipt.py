@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
+from .console import sanitize_text
 from .protocol import b64u, canonical_json, sign, unb64u, verify
 
 _PAYLOAD_FIELDS = (
@@ -30,8 +31,31 @@ _EVENT_FIELDS = (
 )
 
 
+_END_REASONS = {
+    "stopped_by_person": "You stopped the session",
+    "session_timeout": "The 30 minute limit ended the session",
+    "revoked": "Your helper ended the pairing",
+    "pairing_changed": "The pairing on this computer changed, so the session ended",
+    "error": "An unexpected problem ended the session",
+}
+
+
 class ReceiptError(ValueError):
     pass
+
+
+class ReceiptKeyMismatch(ReceiptError):
+    pass
+
+
+def _sanitize_value(value):
+    if isinstance(value, str):
+        return sanitize_text(value)
+    if isinstance(value, list):
+        return [_sanitize_value(item) for item in value]
+    if isinstance(value, dict):
+        return {sanitize_text(key): _sanitize_value(item) for key, item in value.items()}
+    return value
 
 
 def _receipt_payload(payload: dict, public_key: bytes) -> dict:
@@ -50,6 +74,9 @@ def _receipt_payload(payload: dict, public_key: bytes) -> dict:
     for event in normalized["events"]:
         if not all(isinstance(event.get(key), str) for key in ("timestamp", "label", "outcome")):
             raise ValueError("invalid receipt event")
+    normalized = _sanitize_value(normalized)
+    for event in normalized["events"]:
+        event["outcome"] = sanitize_text(event["outcome"], limit=2000)
     normalized["public_key"] = b64u(public_key)
     return normalized
 
@@ -65,20 +92,34 @@ def _encoded_receipt(payload: dict, private_key: bytes, public_key: bytes) -> tu
     return signed_payload, json_text
 
 
+def _local_time(timestamp: str) -> str:
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%d %H:%M")
+    except ValueError:
+        return timestamp
+
+
 def _text_receipt(payload: dict) -> str:
+    reason = _END_REASONS.get(payload["end_reason"], payload["end_reason"])
     lines = [
         "Hermes Hands session receipt",
         f"Device: {payload['device_id']}",
-        f"Started: {payload['started_at']}",
-        f"Ended: {payload['ended_at']}",
-        f"End reason: {payload['end_reason']}",
-        f"Final relay heartbeat: {payload['shutdown_delivery']}",
+        f"Started: {_local_time(payload['started_at'])}",
+        f"Ended: {_local_time(payload['ended_at'])}",
+        reason,
         "Steps:",
     ]
     for event in payload["events"]:
-        line = f"[{event['timestamp']}] {event['label']}: {event['outcome']}"
-        if "delivery_status" in event:
-            line += f" (delivery: {event['delivery_status']})"
+        outcome = event["outcome"]
+        if outcome.startswith("Ended: "):
+            outcome = _END_REASONS.get(outcome[len("Ended: "):], outcome)
+        if event["label"] == "Help request":
+            outcome = {
+                "accepted": "sent",
+                "pending": "may not have reached your helper",
+                "not_sent": "not sent",
+            }.get(event.get("delivery_status"), outcome)
+        line = f"[{_local_time(event['timestamp'])}] {event['label']}: {outcome}"
         lines.append(line)
         checkup = event.get("checkup")
         if checkup is None:
@@ -89,7 +130,7 @@ def _text_receipt(payload: dict) -> str:
             state = f"{fact.get('status', 'unknown')}/{fact.get('availability', 'unknown')}"
             lines.append(
                 f"  Fact {fact.get('id', 'unknown')} ({fact.get('label', 'unknown')}): "
-                f"{value}{unit} [{state}] from {fact.get('source', 'unknown')}"
+                f"{value}{unit} [{state}]"
             )
         for inference in checkup.get("inferences", []):
             evidence = ", ".join(inference.get("evidence_ids", []))
@@ -152,10 +193,12 @@ def update_receipt(
     _write_pair(paths, payload, private_key, public_key)
 
 
-def verify_receipt(path: str | Path) -> dict:
+def verify_receipt(path: str | Path, public_key: bytes) -> dict:
     try:
         envelope = json.loads(Path(path).read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except FileNotFoundError as exc:
+        raise ReceiptError("the receipt file was not found") from exc
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise ReceiptError("could not read JSON receipt") from exc
     if not isinstance(envelope, dict) or set(envelope) != {"payload", "signature"}:
         raise ReceiptError("invalid receipt envelope")
@@ -169,12 +212,18 @@ def verify_receipt(path: str | Path) -> dict:
     if not isinstance(public_key_text, str):
         raise ReceiptError("receipt has no public key")
     try:
-        public_key = unb64u(public_key_text)
+        embedded_key = unb64u(public_key_text)
         signature = unb64u(signature_text)
     except ValueError as exc:
         raise ReceiptError("receipt signature is malformed") from exc
-    if len(public_key) != 32 or len(signature) != 64:
+    if len(embedded_key) != 32 or len(public_key) != 32 or len(signature) != 64:
         raise ReceiptError("receipt signature is malformed")
-    if not verify(public_key, signature, canonical_json(payload)):
+    if embedded_key != public_key:
+        raise ReceiptKeyMismatch("the receipt was signed by a different key")
+    try:
+        signed = canonical_json(payload)
+    except UnicodeEncodeError as exc:
+        raise ReceiptError("receipt payload has text that cannot be signed") from exc
+    if not verify(public_key, signature, signed):
         raise ReceiptError("signature does not match the receipt payload")
     return payload

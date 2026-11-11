@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 from xml.etree import ElementTree
+
+from .console import sanitize_text
 
 TASK_NAME = "HermesHands"
 
@@ -51,6 +54,11 @@ def task_xml(*, executable: str, username: str, allow_screen: bool = False) -> b
     return (declaration + ElementTree.tostring(task, encoding="unicode")).encode("utf-16")
 
 
+def _scheduler_text(output: bytes) -> str:
+    text = re.sub(r"\r+\n", "\n", output.decode("oem", errors="replace"))
+    return sanitize_text(text, keep="\n\t").rstrip("\n")
+
+
 def install(*, dry_run: bool = False, remove: bool = False, allow_screen: bool = False) -> int:
     if "HERMES_HANDS_JOB" in os.environ:
         print("install-service is unavailable from a Hermes Hands device job", file=sys.stderr)
@@ -75,13 +83,22 @@ def install(*, dry_run: bool = False, remove: bool = False, allow_screen: bool =
             xml_path = Path(temp_dir) / "task.xml"
             xml_path.write_bytes(task_xml(executable=executable, username=username, allow_screen=allow_screen))
             args = command(xml_path=str(xml_path))
-            print(subprocess.list2cmdline(args))
+            print(sanitize_text(subprocess.list2cmdline(args), keep="\n\t"))
             if dry_run:
-                print(xml_path.read_text(encoding="utf-16"))
+                print(sanitize_text(xml_path.read_text(encoding="utf-16"), keep="\n\t"))
                 return 0
-            return subprocess.run(args, check=False).returncode
-    print(subprocess.list2cmdline(args))
+            result = subprocess.run(args, check=False, capture_output=True)
+            if result.stdout:
+                print(_scheduler_text(result.stdout))
+            if result.stderr:
+                print(_scheduler_text(result.stderr), file=sys.stderr)
+            return result.returncode
+    print(sanitize_text(subprocess.list2cmdline(args), keep="\n\t"))
     if dry_run:
         return 0
-    result = subprocess.run(args, check=False)
+    result = subprocess.run(args, check=False, capture_output=True)
+    if result.stdout:
+        print(_scheduler_text(result.stdout))
+    if result.stderr:
+        print(_scheduler_text(result.stderr), file=sys.stderr)
     return result.returncode

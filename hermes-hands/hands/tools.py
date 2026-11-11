@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 import uuid
 
-from . import client, store, targets
+from . import client, messages, store, targets
+
+logger = logging.getLogger(__name__)
 
 SCREENSHOT_MAX_AGE_SECONDS = 24 * 60 * 60
 
@@ -59,14 +62,18 @@ def register_tools(ctx) -> None:
             output.write_bytes(png)
             path = str(output.resolve())
             return json.dumps({"text": f"Screenshot saved. Include this exact line in your reply and call vision_analyze on the path.\nMEDIA:{path}"})
-        except Exception as exc:
-            return json.dumps({"error": str(exc) or "Screenshot failed."})
+        except client.HandsError as exc:
+            return json.dumps({"error": str(exc)})
+        except Exception:
+            logger.warning("hermes-hands: hands_screenshot failed", exc_info=True)
+            return json.dumps({"error": messages.SCREENSHOT_GATEWAY_FAILED})
 
     def devices(_arguments: dict) -> str:
         try:
             return json.dumps({"devices": store.list_devices()})
-        except Exception as exc:
-            return json.dumps({"error": str(exc) or "Could not list devices."})
+        except Exception:
+            logger.warning("hermes-hands: hands_devices failed", exc_info=True)
+            return json.dumps({"error": messages.DEVICES_GATEWAY_FAILED})
 
     def checkup(_arguments: dict) -> str:
         try:
@@ -87,8 +94,11 @@ def register_tools(ctx) -> None:
             if store.get_device(target) is None:
                 return json.dumps({"error": f"No paired device named {target}."})
             return json.dumps(client.request_checkup(target), ensure_ascii=False, indent=2)
-        except Exception as exc:
-            return json.dumps({"error": str(exc) or "Checkup failed."})
+        except client.HandsError as exc:
+            return json.dumps({"error": str(exc)})
+        except Exception:
+            logger.warning("hermes-hands: hands_checkup failed", exc_info=True)
+            return json.dumps({"error": messages.CHECKUP_GATEWAY_FAILED})
 
     ctx.register_tool(
         name="hands_screenshot",
@@ -118,8 +128,12 @@ def register_tools(ctx) -> None:
             "description": (
                 "For any request to run a checkup, perform a health check, or diagnose why a laptop is slow, "
                 "call hands_checkup first. This built-in read-only device report separates observed facts "
-                "from inferences. Ad hoc terminal commands on witness devices are blocked or require "
-                "owner approval. When the user requests only observed facts and unavailable items, "
+                "from inferences. On a witness device, every tool call that reaches the device needs "
+                "the helper's approval, this checkup included. Shell composition and known script "
+                "interpreters are blocked there. Every other command, including ones that can start "
+                "programs, needs the helper's approval, and each screenshot also asks the person at "
+                "the computer. "
+                "When the user requests only observed facts and unavailable items, "
                 "report only those without unsolicited causal claims or repair advice. "
                 "Do not infer that a reboot marker causes memory pressure or slowness, or guarantee "
                 "that a restart clears it, from checkup facts alone. "

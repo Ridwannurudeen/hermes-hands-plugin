@@ -37,6 +37,7 @@ SEED = "9a" * 32
 def prepare_context(ctx):
     unloaders = []
     hooks = []
+    ctx._gateway_injection_allowed = lambda: True
 
     def register_hook(name, callback):
         hooks.append((name, callback))
@@ -47,6 +48,7 @@ def prepare_context(ctx):
         ctx.calls.append(("unload", callback))
 
     ctx.register_hook = register_hook
+    ctx.register_middleware = lambda kind, callback: ctx.calls.append(("middleware", kind))
     ctx.on_unload = on_unload
     ctx._hands_unloaders = unloaders
     ctx._hands_hooks = hooks
@@ -99,6 +101,7 @@ def test_register_wires_everything(plugin):
         ("tool", "hands_checkup"),
     } <= set(ctx.calls)
     assert [(name, callback) for name, callback in ctx._hands_hooks if name == "pre_tool_call"]
+    assert ("middleware", "tool_execution") in ctx.calls
     kinds = [kind for kind, _ in ctx.calls]
     assert kinds.index("hook") < kinds.index("unload")
     assert "provides_hooks: [pre_tool_call]" in (PLUGIN_DIR / "plugin.yaml").read_text(
@@ -602,6 +605,42 @@ def test_deliver_help_once_uses_real_plugin_context_without_gateway(hands_db, tm
     assert client.deliver_help_once(ctx) is False
     pending = store.get_help_request(device.device_id, "4" * 32)
     assert pending["status"] == "pending" and pending["attempts"] == 1
+
+
+def test_help_poller_leases_nothing_until_a_gateway_injector_exists(hands_db, tmp_path):
+    from hermes_cli.plugins import PluginContext, PluginManager
+    from hermes_cli.plugins_manifest import PluginManifest
+
+    manager = PluginManager(scope_key=str(tmp_path))
+    ctx = PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
+    device = Device("laptop")
+    store.record_seen(
+        device.device_id,
+        instance="serve-1",
+        witness=True,
+        session_state="active",
+        capabilities=["witness-v1", "help-v1"],
+    )
+    store.set_help_origin(device.device_id, "telegram:42", {"platform": "telegram", "chat_id": "1"}, "s")
+    assert store.accept_help_request(
+        device.device_id, request_id="5" * 32, instance="serve-1", text="help"
+    ) == "accepted"
+
+    class OneTick:
+        def __init__(self):
+            self.waits = 0
+
+        def wait(self, _timeout):
+            self.waits += 1
+            return self.waits == 2
+
+    client._help_poller(ctx, OneTick())
+    pending = store.get_help_request(device.device_id, "5" * 32)
+    assert pending["status"] == "pending" and pending["attempts"] == 0
+
+    manager.set_gateway_message_injector(object(), lambda **kwargs: True)
+    client._help_poller(ctx, OneTick())
+    assert store.get_help_request(device.device_id, "5" * 32)["attempts"] == 1
 
 
 def test_hermes_refuses_a_help_origin_that_would_open_a_new_chat(plugin, monkeypatch, caplog, tmp_path):

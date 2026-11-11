@@ -8,13 +8,36 @@ import sys
 from . import config
 from .protocol import canonical_json, policy_hash
 
+# A command word after common shell wrappers, assignments and an optional path.
+_COMMAND = (
+    r"(?:^|[\r\n;&|(`]|\$\()\s*"
+    r"(?:(?:[A-Za-z_]\w*=\S*|sudo|env|command|exec|nice(?:\s+-n\s+-?\d+)?|timeout\s+\d+(?:\.\d+)?[smhd]?)\s+)*"
+    r"(?:(?:powershell|pwsh)(?:\.exe)?\s+(?:-NoProfile\s+)?-(?:c|Command)\s+['\"]?\s*)?"
+    r"(?:[^\s;&|()'\"`]*[\\/])?['\"]?"
+)
+# The agent's own process names as one whole argument, the way pkill, killall and pgrep match them.
+_AGENT = r"(?:hermes[-_.]?hands?|hermes|hands|hermeshands_device(?:\.cli)?|python(?:w|[0-9]+(?:\.[0-9]+)*)?)(?:\.exe)?"
+_AGENT_ARG = rf"""(?:"{_AGENT}"|'{_AGENT}'|{_AGENT})(?=[\s'"`]|$|[;&|)])"""
+# The same names for Windows tools, which also take * wildcards.
+_AGENT_GLOB = r"(?:hermes-?hands|hermes\*|python(?:w|[0-9]+(?:\.[0-9]+)*)?|p(?:y(?:t(?:h(?:o(?:n)?)?)?)?)?\*)(?:\.exe)?"
+_AGENT_GLOB_ARG = rf"""(?:"{_AGENT_GLOB}"|'{_AGENT_GLOB}'|{_AGENT_GLOB})(?=[\s'"]|$|[;&|)])"""
+
 DEFAULTS = [
     r"(?:^|[\s;&|(`'\"])(?:(?:\"[^\"]*[\\/]|'[^']*[\\/]|[^\s;&|()'\"`]+[\\/])*)hermes-?hands(?:\.exe)?[\"']?\s+(?:pair|unpair|serve|install-service|policy)\b|"
     r"(?:^|[\s;&|(`'\"])(?:(?:\"[^\"]*[\\/]|'[^']*[\\/]|[^\s;&|()'\"`]+[\\/])*)(?:python(?:w|[0-9]+(?:\.[0-9]+)*)?|py)(?:\.exe)?[\"']?(?:\s+-(?!m(?:\s|hermeshands_device))[^\s]+(?:\s+(?!-)[^\s]+)?)*\s+-m\s*hermeshands_device(?:\.cli)?\s+(?:pair|unpair|serve|install-service|policy)\b|"
     r"\b(?:pipx|pip|runpip|uv\s+(?:tool|pip))\s+uninstall\s+hermes-?hands\b|\bpython\s+-m\s+pip\s+uninstall\s+hermes-?hands\b|^\s*hermeshands\s*$",
     r"\.hermes-hands(?:[/\\]|\b)",
-    r"\b(?:taskkill|Stop-Process|kill)\b.*(?:\$PPID|<agent-pid>)",
-    r"\b(?:schtasks\s+/{1,2}(?:End|Delete)|Stop-ScheduledTask|Unregister-ScheduledTask)\b.*HermesHands|\btaskkill\b.*(?:/|//|-)(?:F|IM)\b.*hermes-?hands(?:\.exe)?\b|\bkillall\s+hermes-?hands(?:\.exe)?\b",
+    r"\b(?:taskkill|Stop-Process|kill)\b.*(?:\$\{?PPID\}?|<agent-pid>)",
+    # Other Windows schtasks task names and WMI process termination remain outside these patterns.
+    r"\b(?:schtasks\s+/{1,2}(?:End|Delete|Change)|Stop-ScheduledTask|Disable-ScheduledTask|Unregister-ScheduledTask)\b.*HermesHands|\btaskkill\b.*(?:/|//|-)(?:F|IM)\b.*hermes-?hands(?:\.exe)?\b|\bkillall\s+hermes-?hands(?:\.exe)?\b",
+    # Killing the agent by process name. Best effort: a name spelled to avoid these still gets through.
+    rf"{_COMMAND}(?:pkill|killall)['\"]?(?:\s+[^\s;&|]+)*?\s+{_AGENT_ARG}|"
+    rf"{_COMMAND}kill\b[^\r\n;&|]*?(?:\$\(|`)\s*(?:pgrep|pidof)(?:\s+[^\s;&|)`]+)*?\s+{_AGENT_ARG}|"
+    rf"{_COMMAND}pgrep(?:\s+[^\s;&|]+)*?\s+{_AGENT_ARG}[^\r\n;&]*\|\s*xargs\b[^\r\n;&|]*\bkill\b|"
+    rf"{_COMMAND}taskkill\b[^\r\n;&|]*(?:/{{1,2}}|-)IM\s+{_AGENT_GLOB_ARG}|"
+    rf"{_COMMAND}taskkill\b[^\r\n;&|]*IMAGENAME\s+eq\s+{_AGENT_GLOB}(?=[\s'\"]|$)|"
+    rf"{_COMMAND}Stop-Process\b[^\r\n;&|]*-(?:Process)?Name\s+{_AGENT_GLOB_ARG}|"
+    rf"{_COMMAND}Get-Process\b(?:\s+-(?:Process)?Name)?\s+{_AGENT_GLOB_ARG}[^\r\n;&]*\|\s*Stop-Process\b",
     r"\bsudo\b",
     r"(?:rm\s+-rf\s+(?:/(?:\s|$)|['\"]?(?:~/?|\$HOME/?)['\"]?(?:\s|$))|\bRemove-Item\b.*(?:[A-Za-z]:\\|[/\\])(?:\s|$).*?-Recurse)",
     r"\bmkfs(?:\.[\w-]+)?\b|\bdd\b.*\bof=/dev/",

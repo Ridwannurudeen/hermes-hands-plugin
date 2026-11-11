@@ -16,7 +16,6 @@ import json
 import logging
 import re
 import secrets
-import sqlite3
 import threading
 import time
 import unicodedata
@@ -58,6 +57,8 @@ MAX_JOB_TEXT = 16_000_000  # characters in an exec job's script, and in its stdi
 MAX_PNG_BYTES = 2 * 1024 * 1024
 _MAX_PNG_B64 = 4 * -(-MAX_PNG_BYTES // 3)
 MAX_HELP_BODY_BYTES = 8192
+MAX_PENDING_CHUNKS = 256  # out-of-order result chunks a job may hold (past a gap in device seqs)
+MAX_BUFFERED_CHARS = 4 * 1024 * 1024  # characters in those chunks
 _LIVENESS_EVERY = 1.0
 _ABANDONED_AFTER = 60  # seconds without a gateway fetch: the caller is gone, cancel the job
 _HEARTBEAT_EVERY = 5
@@ -70,6 +71,12 @@ _STOPPING_STATES = {"stopping", "stopped"}
 _CAPABILITIES = {"witness-v1", "checkup-v1", "help-v1", "receipt-v1"}
 
 logger = logging.getLogger(__name__)
+_help_context = None
+
+
+def configure_help(ctx) -> None:
+    global _help_context
+    _help_context = ctx
 
 
 @dataclass(frozen=True)
@@ -118,6 +125,7 @@ class _Job:
     device_id: str
     device_name: str
     job_type: str = "exec"
+    queued_state: tuple[bool, str, str | None] = (False, "normal", None)
     chunks: dict[int, str] = field(default_factory=dict)  # by device seq, not yet handed out
     received: int = 0  # device seqs 0..received-1 have all arrived
     final_seq: int | None = None
@@ -160,16 +168,29 @@ def _required_string(request: dict, key: str) -> str:
     return value
 
 
+def _clean_label(value: str) -> str:
+    return "".join(character for character in value if unicodedata.category(character) not in {"Cc", "Cf", "Cs"})
+
+
+def _queue_state(device: dict) -> tuple[bool, str, str | None]:
+    # Legacy normal agents may first identify their instance after work was queued.
+    # Witness instance identity is part of the consent session, so it must match exactly.
+    return device["witness"], device["session_state"], device["instance"] if device["witness"] else None
+
+
 def _help_text(value: str) -> str:
-    cleaned = "".join(
-        character for character in value.strip() if unicodedata.category(character) != "Cc"
-    )[:200]
+    cleaned = _clean_label(value.strip())[:200]
     if not cleaned:
         raise ValueError("text")
     return cleaned
 
 
 def _witness_fields(request: dict) -> tuple[bool, str, list[str]]:
+    if "stop_reason" in request and (
+        request["stop_reason"] not in ("stopped_by_person", "session_timeout")
+        or request.get("session_state") not in _STOPPING_STATES
+    ):
+        raise ValueError("stop_reason")
     if "witness" not in request:
         state = request.get("session_state", "normal")
         capabilities = request.get("capabilities", [])
@@ -216,6 +237,12 @@ def _pairing_detail(exc: store.PairingError) -> str:
 class Relay:
     def __init__(self, keys: Keys):
         self._keys = keys
+        # Store reads and writes that need this lock run on worker threads (_enqueue, _open_poll,
+        # _cancel, _record_seen, _check_device, _fail_device), so the reads stay atomic with the
+        # queue and stop decisions. Two costs remain on the event loop: device_result's own
+        # _finish_locked (an oversized screenshot or a full output buffer, both rare) reads the
+        # store, and any loop-side `with self._lock` waits while a worker holds the lock for SQLite.
+        # Removing those needs an asyncio lock and a store redesign.
         self._lock = threading.Lock()
         self._jobs: dict[str, _Job] = {}
         self._queues: dict[str, deque] = {}
@@ -225,6 +252,7 @@ class Relay:
         self._instances: dict[str, dict[str, float]] = {}
         # (device id, agent instance or None) -> generation of that agent's newest poll
         self._polls: dict[tuple[str, str | None], int] = {}
+        self._stop_reasons: dict[str, str] = {}
         # Long-polls waiting for a change, by device id (a queued job) or job id (output, the end).
         self._waiters: dict[str, set[tuple[asyncio.AbstractEventLoop, asyncio.Future]]] = {}
 
@@ -246,9 +274,12 @@ class Relay:
         """Write the liveness row the gateway reads (``store.relay_alive``) and reap abandoned jobs."""
         try:
             store.write_relay_heartbeat()
-        except sqlite3.Error:
+        except Exception:
             logger.warning("hermes-hands: could not write the relay heartbeat", exc_info=True)
-        self._reap()
+        try:
+            self._reap()
+        except Exception:
+            logger.warning("hermes-hands: could not reap abandoned jobs", exc_info=True)
 
     def _reap(self) -> None:
         """Cancel and drop jobs nobody has fetched for ``_ABANDONED_AFTER`` seconds."""
@@ -296,19 +327,34 @@ class Relay:
         """Fail queued work and wake parked polls after the stored session enters STOPPING."""
         self._supersede_polls_locked(device_id, [instance for dev, instance in self._polls if dev == device_id])
         self._queues.pop(device_id, None)
+        reason = self._stop_reasons.get(device_id, "session_ended")
         for job in self._jobs.values():
             if job.device_id == device_id and not job.done and not job.picked:
-                job.done, job.returncode, job.error = True, 130, "stopped_by_person"
+                job.done, job.returncode, job.error = True, 124 if reason == "session_timeout" else 130, reason
                 self._wake_locked(job.job_id)
 
-    def _record_seen(self, device_id: str, **fields) -> tuple[bool | None, dict | None]:
-        """Persist a signed device update and stop queued work under the same relay lock."""
+    def _record_seen(self, device_id: str, *, stop_reason: str | None = None, **fields) -> tuple[bool | None, dict | None]:
+        """Persist a signed device update and stop queued work under the same relay lock. A refused
+        policy fails the device's jobs here too, on this worker thread (``_fail_device``)."""
         with self._lock:
+            previous = store.device_by_id(device_id)
             ok = store.record_seen(device_id, **fields)
             saved = store.device_by_id(device_id)
+            if saved is not None and previous is not None and _queue_state(previous) != _queue_state(saved):
+                self._supersede_polls_locked(device_id, [i for d, i in self._polls if d == device_id])
             if saved is not None and saved["session_state"] in _STOPPING_STATES:
+                if stop_reason is not None:
+                    self._stop_reasons[device_id] = stop_reason
                 self._stop_device_locked(device_id)
-            return ok, saved
+            elif saved is not None:
+                self._stop_reasons.pop(device_id, None)
+                state = _queue_state(saved)
+                for job in self._jobs.values():
+                    if job.device_id == device_id and not job.done and not job.picked and job.queued_state != state:
+                        self._finish_locked(job, UNREACHABLE, "hands: the device session changed before this job started. Request it again.")
+        if ok is False and saved is not None:
+            self._fail_device(device_id, saved["name"])
+        return ok, saved
 
     def _cancel_locked(self, job: _Job) -> None:
         if not job.done:
@@ -463,7 +509,12 @@ class Relay:
                 None,
                 Reply.json(401, {"error": "bad_signature", "detail": messages.UNAUTHENTICATED}),
             )
-        if not self._nonces.check_and_add(bearer.nonce, int(time.time())):
+        # One clock reading: a nonce is burned only while its bearer is fresh, and NonceCache keeps
+        # it until that bearer can no longer be fresh.
+        now = int(time.time())
+        if not protocol.fresh(bearer.ts, now):
+            return None, None, Reply.json(401, {"error": "stale", "detail": messages.UNAUTHENTICATED})
+        if not self._nonces.check_and_add(bearer.nonce, now):
             return None, None, Reply.json(401, {"error": "replayed", "detail": messages.REPLAYED})
         if device is None:
             store.mark_told(bearer.device_id)  # it is told again until STOP_GRACE has passed
@@ -514,7 +565,6 @@ class Relay:
         if ok is None:
             return self._unknown(device["device_id"], path, nonce, peer)
         if not ok:
-            self._fail_device(device["device_id"], device["name"])
             reply = self._signed(
                 409,
                 {"error": "policy_changed", "detail": messages.POLICY_CHANGED_WIRE},
@@ -565,10 +615,10 @@ class Relay:
             device_id = await asyncio.to_thread(
                 store.complete_pairing,
                 _bearer(headers),
-                name=name,
+                name=_clean_label(name),
                 public_key=request["public_key"],
-                os=device_os,
-                home=home,
+                os=_clean_label(device_os),
+                home=_clean_label(home),
                 policy_hash=policy_hash,
             )
         except store.PairingError as exc:
@@ -618,18 +668,17 @@ class Relay:
             witness=witness,
             session_state=session_state,
             capabilities=capabilities,
+            stop_reason=request.get("stop_reason"),
         )
         refusal = self._seen_refusal(ok, device, path, nonce, peer)
         if refusal is not None:
             return refusal
         self._note_instance(device, instance)
         device_id, deadline = device["device_id"], time.monotonic() + wait
-        with self._lock:
-            saved = store.device_by_id(device_id)
-            if saved is None or saved["session_state"] in _STOPPING_STATES:
-                return Reply(204)
-            self._supersede_polls_locked(device_id, [instance])
-            generation = self._polls[(device_id, instance)]
+        poll_state = (witness, session_state, instance if witness else None)
+        generation = await asyncio.to_thread(self._open_poll, device_id, instance, poll_state)
+        if generation is None:
+            return Reply(204)
         while True:
             with self._lock:
                 newest = self._polls.get((device_id, instance)) == generation
@@ -645,6 +694,16 @@ class Relay:
             if waiter is None:
                 return Reply(204)
             await self._wait(device_id, waiter, remaining)
+
+    def _open_poll(self, device_id: str, instance: str | None, poll_state: tuple[bool, str, str | None]) -> int | None:
+        """This poll's generation, or None when the session is stopping (on a worker thread: it reads
+        the store under the lock)."""
+        with self._lock:
+            saved = store.device_by_id(device_id)
+            if saved is None or saved["session_state"] in _STOPPING_STATES or _queue_state(saved) != poll_state:
+                return None
+            self._supersede_polls_locked(device_id, [instance])
+            return self._polls[(device_id, instance)]
 
     async def device_help(self, principal, headers, path: str, body: bytes, peer: str) -> Reply:
         """Accept a bounded help message from the currently witnessed paired device."""
@@ -673,6 +732,15 @@ class Relay:
         except (ValueError, KeyError, TypeError, AttributeError):
             return self._signed(
                 400, {"error": "bad_request", "detail": messages.BAD_REQUEST}, path, nonce
+            )
+
+        # The dashboard shares this outbox with the gateway, so its own missing injector is normal.
+        if _help_context is None or not await asyncio.to_thread(_help_context._gateway_injection_allowed):
+            return self._signed(
+                409,
+                {"error": "help_disabled", "detail": "hands: the helper has not enabled device messages."},
+                path,
+                nonce,
             )
 
         result = await asyncio.to_thread(
@@ -782,6 +850,12 @@ class Relay:
                     nonce,
                 )
             if seq >= job.received and seq not in job.chunks:
+                ahead = [c for s, c in job.chunks.items() if s > job.received]
+                if seq > job.received and (
+                    len(ahead) >= MAX_PENDING_CHUNKS or sum(map(len, ahead)) + len(chunk) > MAX_BUFFERED_CHARS
+                ):
+                    self._finish_locked(job, UNREACHABLE, "hands: the device output buffer is full. Request less output.")
+                    return self._signed(413, {"error": "too_large", "detail": "hands: the device output buffer is full."}, path, nonce)
                 job.chunks[seq] = chunk
                 if done:
                     job.final_seq, job.returncode = seq, returncode
@@ -819,13 +893,14 @@ class Relay:
             self._record_seen,
             device["device_id"],
             policy_hash=policy_hash,
-            os=device_os,
-            home=home,
-            agent_version=agent_version,
+            os=_clean_label(device_os),
+            home=_clean_label(home),
+            agent_version=_clean_label(agent_version),
             instance=instance,
             witness=witness,
             session_state=session_state,
             capabilities=capabilities,
+            stop_reason=beat.get("stop_reason"),
         )
         refusal = self._seen_refusal(ok, device, path, nonce, peer)
         if refusal is not None:
@@ -851,6 +926,19 @@ class Relay:
             if not isinstance(request, dict):
                 raise ValueError("body")
             name, kind = str(request["device"]), str(request.get("type", "exec"))
+            decision = request.get("decision")
+            if "decision" in request and (
+                not isinstance(decision, dict)
+                or set(decision) != {"device_id", "state"}
+                or not isinstance(decision["device_id"], str)
+                or not isinstance(decision["state"], list)
+                or len(decision["state"]) != 3
+                or type(decision["state"][0]) is not bool
+                or not isinstance(decision["state"][1], str)
+                or decision["state"][1] not in _SESSION_STATES
+                or (decision["state"][2] is not None and not isinstance(decision["state"][2], str))
+            ):
+                raise ValueError("decision")
             if kind == "exec":
                 extra = {
                     "script": str(request["script"]),
@@ -882,7 +970,7 @@ class Relay:
                     extra["stdin"] = stdin_text
                 extra["file_op"] = file_op
             elif kind == "checkup":
-                if set(request) != {"device", "type"}:
+                if set(request) - {"decision"} != {"device", "type"}:
                     raise ValueError("checkup arguments")
                 extra = {}
             elif kind == "screenshot":
@@ -895,6 +983,11 @@ class Relay:
             return Reply.json(413, {"error": "too_large", "detail": messages.JOB_TOO_LARGE})
         job_id = secrets.token_hex(8)
         payload = {"job_id": job_id, "type": kind, **extra}
+        return await asyncio.to_thread(self._enqueue, name, kind, payload, decision)
+
+    def _enqueue(self, name: str, kind: str, payload: dict, decision: dict | None = None) -> Reply:
+        """Queue ``payload`` for device ``name`` (on a worker thread: it reads the store under the lock)."""
+        job_id = payload["job_id"]
         with self._lock:
             device = store.get_device(name)
             if device is None:
@@ -910,10 +1003,20 @@ class Relay:
                 return Reply.json(
                     409,
                     {
-                        "error": "stopped_by_person",
+                        "error": self._stop_reasons.get(stored["device_id"], "session_ended"),
                         "detail": "hands: this device session has stopped.",
                     },
                 )
+            if (decision is None and stored["witness"]) or (
+                decision is not None and (
+                    decision["device_id"] != stored["device_id"]
+                    or tuple(decision["state"]) != _queue_state(stored)
+                )
+            ):
+                return Reply.json(409, {
+                    "error": "session_changed",
+                    "detail": "hands: the device session changed after the tool decision. Nothing ran. Request approval again.",
+                })
             if not stored["policy_ok"]:
                 return Reply.json(
                     409, {"error": "policy_changed", "detail": messages.policy_changed(name)}
@@ -928,7 +1031,7 @@ class Relay:
                         "detail": "hands: this device does not advertise checkup-v1.",
                     },
                 )
-            self._jobs[job_id] = _Job(job_id, stored["device_id"], name, job_type=kind)
+            self._jobs[job_id] = _Job(job_id, stored["device_id"], name, job_type=kind, queued_state=_queue_state(stored))
             self._queues.setdefault(stored["device_id"], deque()).append(payload)
             self._wake_locked(stored["device_id"])
         return Reply.json(200, {"job_id": job_id})
@@ -968,11 +1071,15 @@ class Relay:
             job_id = str(json.loads(body)["job_id"])
         except (ValueError, KeyError, TypeError):
             return Reply.json(400, {"error": "bad_request", "detail": messages.BAD_REQUEST})
+        await asyncio.to_thread(self._cancel, job_id)
+        return Reply.json(200, {"ok": True})
+
+    def _cancel(self, job_id: str) -> None:
+        """On a worker thread: ending a picked job reads the store under the lock."""
         with self._lock:
             job = self._jobs.get(job_id)
             if job is not None:
                 self._cancel_locked(job)
-        return Reply.json(200, {"ok": True})
 
     async def local_state(self, principal, headers, path: str, body: bytes) -> Reply:
         refusal = self._local_refusal(principal, headers)

@@ -67,3 +67,21 @@ def test_cleanup_keeps_out_logs_newer_than_seven_days(monkeypatch, tmp_path):
     recent_log.write_text("content", encoding="utf-8")
     assert janitor.cleanup() == 0
     assert recent_log.exists()
+
+
+def test_witness_sweep_runs_before_the_log_file_opens(monkeypatch, tmp_path):
+    log_path = tmp_path / "out" / "device.log"
+    seen = []
+    root_logger = logging.getLogger()
+    monkeypatch.setattr(config, "ROOT", tmp_path)
+    monkeypatch.setattr(janitor, "cleanup", lambda: seen.append(log_path.exists()))
+    monkeypatch.setattr(janitor.threading, "Thread", lambda **_kwargs: type("NoopThread", (), {"start": lambda self: None})())
+    monkeypatch.setattr(root_logger, "handlers", [])
+    monkeypatch.setattr(root_logger, "level", logging.WARNING)
+    try:
+        janitor.start(witness=True)
+    finally:
+        for handler in list(root_logger.handlers):
+            handler.close()
+    assert seen == [False]
+    assert log_path.exists()

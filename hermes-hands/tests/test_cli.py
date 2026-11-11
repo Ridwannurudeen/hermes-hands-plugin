@@ -273,18 +273,24 @@ def test_pair_cli_mints_code_and_prints_device_command(monkeypatch, capsys):
     config.load_config_readonly = lambda: {"dashboard": {"public_url": "https://hands.example.com"}}
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.config", config)
-    monkeypatch.setattr(cli.store, "mint_pairing_code", lambda name, **kwargs: "pair-code")
+    minted = []
+    monkeypatch.setattr(
+        cli.store,
+        "mint_pairing_code",
+        lambda name, *, owner_label: minted.append((name, owner_label)) or "pair-code",
+    )
     ctx = Context()
     cli.register_cli(ctx, has_seed=True)
     parser = argparse.ArgumentParser()
     ctx.setup_fn(parser)
-    args = parser.parse_args(["pair", "my laptop"])
+    args = parser.parse_args(["pair", "my laptop", "--owner-label", "Sam"])
 
     ctx.handler(args)
 
+    assert minted == [("my laptop", "Sam")]
     assert capsys.readouterr().out == (
         "Pair code: pair-code\n"
-        "Owner label: local owner\n"
+        "Owner label: Sam\n"
         "Run on the device: hermes-hands pair https://hands.example.com --name 'my laptop' --code=pair-code\n"
     )
 
@@ -297,7 +303,7 @@ def test_pair_cli_refuses_without_a_relay_seed(monkeypatch, capsys):
     parser = argparse.ArgumentParser()
     ctx.setup_fn(parser)
 
-    ctx.handler(parser.parse_args(["pair", "laptop"]))
+    ctx.handler(parser.parse_args(["pair", "laptop", "--owner-label", "Sam"]))
 
     assert capsys.readouterr().out == cli.messages.NOT_SET_UP + "\n"
     assert minted == []
@@ -317,7 +323,7 @@ def test_pair_cli_falls_back_to_dashboard_url(monkeypatch, capsys):
     parser = argparse.ArgumentParser()
     ctx.setup_fn(parser)
 
-    ctx.handler(parser.parse_args(["pair", "laptop"]))
+    ctx.handler(parser.parse_args(["pair", "laptop", "--owner-label", "Sam"]))
 
     out = capsys.readouterr().out
     assert "hermes-hands pair http://127.0.0.1:9119 --name laptop --code=pair-code" in out
@@ -339,7 +345,7 @@ def test_pair_cli_refuses_an_http_public_url(monkeypatch, capsys):
     parser = argparse.ArgumentParser()
     ctx.setup_fn(parser)
 
-    ctx.handler(parser.parse_args(["pair", "laptop"]))
+    ctx.handler(parser.parse_args(["pair", "laptop", "--owner-label", "Sam"]))
 
     out = capsys.readouterr().out
     assert out.startswith(
@@ -364,7 +370,7 @@ def test_pair_cli_ignores_an_undeclared_public_url_setting(monkeypatch, capsys):
     parser = argparse.ArgumentParser()
     ctx.setup_fn(parser)
 
-    ctx.handler(parser.parse_args(["pair", "laptop"]))
+    ctx.handler(parser.parse_args(["pair", "laptop", "--owner-label", "Sam"]))
 
     assert (
         "hermes-hands pair https://hands.example.com --name laptop --code=pair-code"

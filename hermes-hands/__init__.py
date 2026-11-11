@@ -15,7 +15,9 @@ def register(ctx) -> None:
     from .hands.provider import HandsProvider
 
     witness.register(ctx)
+    ctx.register_middleware("tool_execution", client.tool_execution)
     store.OFFLINE_AFTER = int(ctx.get_config("offline_after_seconds", 20))
+    relay.configure_help(ctx)
     seed = get_secret("HANDS_RELAY_SEED")
     keys = relay.derive_keys(seed) if seed else None
     client.configure(

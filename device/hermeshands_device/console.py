@@ -1,43 +1,73 @@
 from __future__ import annotations
 
+import atexit
+import codecs
 import os
+import re
+import select
+import signal
+import unicodedata
 import sys
 import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Callable, Protocol
 
 
 WITNESS_CAPABILITIES = ("witness-v1", "checkup-v1", "help-v1", "receipt-v1")
-WITNESS_START_PROMPT = "Start witness mode? [Y/N]: "
+WITNESS_START_PROMPT = "Start? Type Y or N, then press Enter: "
 SCREENSHOT_SESSION_PROMPT = "Allow screenshot requests this session?"
-SCREENSHOT_REQUEST_PROMPT = "Allow this screenshot?"
 WITNESS_CONSOLE_CLOSED = "Witness mode declined because the console closed.\n"
 WITNESS_DECLINED = "Witness mode declined. No session was started.\n"
 WITNESS_STOPPED_BEFORE_START = "Witness mode stopped before the session started.\n"
-SCREENSHOTS_DISABLED = "Screenshot requests are disabled for this session.\n"
-RECEIPT_SAVED = "Local receipts saved:\nText: {text_path}\nJSON: {json_path}\n"
+SCREENSHOTS_DISABLED = "OK. No screenshots this session.\n"
+RECEIPT_SAVED = "Your record of this session: {text_path}\nJSON: {json_path}\n"
+_EXTENDED_SCAN_CODES = frozenset("GHIKMOPQRSstuvw\x84\x85\x86\x87\x88\x89\x8a\x8b\x8c\x8d\x91\x92\x93\x94")
+_ESCAPE_SEQUENCE_WAIT = 0.5
+
+
+def sanitize_text(value: str, *, limit: int | None = None, keep: str = "") -> str:
+    value = re.sub(r"\x1b(?:\][^\x07\x1b]*(?:\x07|\x1b\\)|\[[0-?]*[ -/]*[@-~]|[@-_])", "", value)
+    value = "".join(
+        char for char in value if char in keep or unicodedata.category(char) not in ("Cc", "Cf", "Cs", "Zl", "Zp")
+    )
+    if limit is not None and len(value) > limit:
+        value = value[:max(0, limit - 3)] + "..."
+    return value
+
+
+def helper_label(value: str | None) -> str:
+    label = sanitize_text(value or "", limit=80).strip()
+    if (
+        not label
+        or label.casefold() in ("local", "local owner")
+        or label.isdecimal()
+        or re.match(r"^[A-Za-z][A-Za-z0-9_-]*\s*:", label)
+    ):
+        return "your helper"
+    return label
 
 
 def _timestamped(text: str) -> str:
-    timestamp = datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-    return f"[{timestamp}] {text}"
+    return f"{datetime.now().strftime('%H:%M')}  {text}"
 
 
 def witness_consent_copy(owner_label: str, gateway_host: str) -> str:
-    owner_label = "".join(char for char in owner_label if char.isprintable()).strip()[:80]
-    owner_label = owner_label or "paired owner"
+    label = helper_label(owner_label)
+    subject = label[:1].upper() + label[1:]
     return (
-        f"{owner_label}'s Hermes wants to help\n"
-        f"Gateway: {gateway_host}\n"
-        "Session limit: 30 minutes\n"
-        f"Capabilities: {', '.join(WITNESS_CAPABILITIES)}\n"
-        "No mouse or keyboard control.\n"
-        "Commands and outcomes are recorded.\n"
-        "Screenshots require separate session and request consent.\n"
-        "Press S or s to stop.\n"
+        f"{subject} wants to help with this computer.\n"
+        f"{subject} can run commands and open or change your files, but only after {label} approves each one.\n"
+        f"{subject} cannot move your mouse or type on your keyboard.\n"
+        "Every command appears here before it runs.\n"
+        "Screenshots: you will be asked each time.\n"
+        "This ends by itself after 30 minutes.\n"
+        f"If Windows asks for permission, choose No unless {label} told you to expect it.\n"
+        "To stop at any time, type S and press Enter.\n"
+        f"To send {label} a message, type H and press Enter.\n"
+        f"Details: {sanitize_text(gateway_host)}\n"
     )
 
 
@@ -62,11 +92,24 @@ class TerminalConsole:
         self._input_generation = 0
         self._input_generation_ack = threading.Event()
         self._pending_lines: deque[_ConsoleLine] = deque()
+        self._terminal_state = None
+        self._terminal_lock = threading.Lock()
+        self._key_after_escape: tuple[str, float] | None = None
+        atexit.register(self.restore_terminal)
 
     def write(self, text: str) -> None:
+        self._write_raw(sanitize_text(text, keep="\n\t"))
+
+    def _write_raw(self, text: str) -> None:
         with self._write_lock:
-            sys.stdout.write(text)
-            sys.stdout.flush()
+            output = sys.stdout
+            if output is None:
+                return
+            try:
+                output.write(text)
+                output.flush()
+            except OSError:
+                return
 
     def read_line(self, prompt: str) -> str | None:
         return self.read_line_with_metadata(prompt).text
@@ -100,8 +143,14 @@ class TerminalConsole:
 
                 def process_character(character: str, character_at: float, *, echo: bool) -> _ConsoleLine | None:
                     if character in ("\x00", "\xe0"):
-                        msvcrt.getwch()
-                        return None
+                        scan_code = msvcrt.getwch()
+                        if character == "\x00" or scan_code in _EXTENDED_SCAN_CODES:
+                            return None
+                        with self._input_lock:
+                            characters.append((character, character_at))
+                        if echo:
+                            self.write(character)
+                        character = scan_code
                     if character == "\x1a":
                         return _ConsoleLine(None, None, character_at)
                     if character in ("\r", "\n"):
@@ -126,7 +175,7 @@ class TerminalConsole:
                             if characters:
                                 characters.pop()
                                 if echo:
-                                    self.write("\b \b")
+                                    self._write_raw("\b \b")
                         return None
                     with self._input_lock:
                         characters.append((character, character_at))
@@ -167,21 +216,56 @@ class TerminalConsole:
                         return line
 
             import termios
-            import tty
 
-            descriptor = sys.stdin.fileno()
-            previous = termios.tcgetattr(descriptor)
-            try:
-                tty.setraw(descriptor)
+            with self._terminal_lock:
+                descriptor = sys.stdin.fileno()
+                if self._terminal_state is None:
+                    self._terminal_state = (termios, descriptor, termios.tcgetattr(descriptor))
+                previous = self._terminal_state[2]
+                current = previous.copy()
+                current[3] &= ~(termios.ICANON | termios.ECHO | termios.ISIG)
+                termios.tcsetattr(descriptor, termios.TCSANOW, current)
+            decoder = codecs.getincrementaldecoder(getattr(sys.stdin, "encoding", None) or "utf-8")(errors="replace")
+
+            def read_character(timeout: float | None = None) -> str | None:
                 while True:
-                    character = sys.stdin.read(1)
-                    character_at = time.monotonic()
+                    if timeout is not None and not select.select([descriptor], [], [], timeout)[0]:
+                        return None
+                    data = os.read(descriptor, 1)
+                    if not data:
+                        return ""
+                    character = decoder.decode(data)
+                    if character:
+                        return character
+
+            try:
+                escape_state = None
+                while True:
+                    if self._key_after_escape is not None:
+                        character, character_at = self._key_after_escape
+                        self._key_after_escape = None
+                    else:
+                        character = read_character()
+                        character_at = time.monotonic()
                     if character in ("", "\x04"):
                         return finish(None, character_at)
+                    if escape_state is not None:
+                        if escape_state == "csi" and " " <= character <= "?":
+                            continue
+                        final = "@" <= character <= "~"
+                        escape_state = None
+                        if final:
+                            continue
                     if character in ("\r", "\n"):
                         self.write("\n")
                         return finish("".join(char for char, _ in characters), character_at)
                     if character == "\x1b":
+                        following = read_character(_ESCAPE_SEQUENCE_WAIT)
+                        if following in ("[", "O"):
+                            escape_state = "csi" if following == "[" else "ss3"
+                            continue
+                        if following:
+                            self._key_after_escape = (following, time.monotonic())
                         self.write("\n")
                         return finish(character, character_at)
                     if character == "\x03":
@@ -190,18 +274,29 @@ class TerminalConsole:
                         with self._input_lock:
                             if characters:
                                 characters.pop()
-                                self.write("\b \b")
+                                self._write_raw("\b \b")
                         continue
                     with self._input_lock:
                         characters.append((character, character_at))
                     self.write(character)
             finally:
-                termios.tcsetattr(descriptor, termios.TCSADRAIN, previous)
+                self.restore_terminal()
         finally:
             with self._input_lock:
                 if self._current_line is characters:
                     self._current_line = None
                 self._input_generation_ack.set()
+
+    def restore_terminal(self) -> None:
+        with self._terminal_lock:
+            if self._terminal_state is None:
+                return
+            termios, descriptor, state = self._terminal_state
+            try:
+                termios.tcsetattr(descriptor, termios.TCSANOW, state)
+            except (OSError, termios.error):
+                # The terminal may already be gone during interpreter shutdown.
+                return
 
     def discard_pending_line(self) -> None:
         with self._input_lock:
@@ -224,6 +319,7 @@ class _Prompt:
     expired: bool = False
     printed_at: float | None = None
     shown: bool = False
+    timeout: float | None = None
 
 
 class ConsoleOwner:
@@ -240,6 +336,9 @@ class ConsoleOwner:
         self._command_prompt_shown = False
         self._thread: threading.Thread | None = None
         self._closed = False
+        self._stopped = False
+        self._sigterm_installed = False
+        self._previous_sigterm_handler = None
         self._startup_ready = threading.Event()
         self._startup_resume = threading.Event()
         self._startup_answer: str | None = None
@@ -249,6 +348,7 @@ class ConsoleOwner:
         with self._lock:
             if self._thread is not None or self._closed:
                 return
+            self._install_sigterm_handler()
             self._thread = threading.Thread(target=self._run, name="hermes-hands-console", daemon=True)
             self._thread.start()
 
@@ -256,6 +356,7 @@ class ConsoleOwner:
         with self._lock:
             if self._thread is not None or self._closed:
                 raise RuntimeError("console owner has already started")
+            self._install_sigterm_handler()
             self._thread = threading.Thread(
                 target=self._run_startup,
                 args=(consent_prompt,),
@@ -263,13 +364,17 @@ class ConsoleOwner:
                 daemon=True,
             )
             self._thread.start()
-        self._startup_ready.wait()
+        try:
+            self._startup_ready.wait()
+        except KeyboardInterrupt:
+            self._stop()
+            raise
         if self._startup_error is not None:
             raise self._startup_error
         return self._startup_answer
 
     def request(self, prompt_id: str, text: str, *, timeout: float | None = None) -> str | None:
-        prompt = _Prompt(prompt_id, text)
+        prompt = _Prompt(prompt_id, text, timeout=timeout)
         with self._lock:
             if self._closed:
                 return None
@@ -301,6 +406,13 @@ class ConsoleOwner:
         return prompt.answer
 
     def close(self) -> None:
+        if (
+            self._sigterm_installed
+            and threading.current_thread() is threading.main_thread()
+            and signal.getsignal(signal.SIGTERM) is signal.default_int_handler
+        ):
+            signal.signal(signal.SIGTERM, self._previous_sigterm_handler)
+            self._sigterm_installed = False
         with self._lock:
             if self._closed:
                 return
@@ -311,9 +423,27 @@ class ConsoleOwner:
                 pending.append(self._active)
                 self._active = None
             for prompt in pending:
-                prompt.answer = None
+                prompt.answer = "S" if self._stopped else None
                 prompt.ready.set()
             self._startup_resume.set()
+        restore = getattr(self.console, "restore_terminal", None)
+        if callable(restore):
+            restore()
+
+    def _install_sigterm_handler(self) -> None:
+        if (
+            os.name == "posix"
+            and isinstance(self.console, TerminalConsole)
+            and threading.current_thread() is threading.main_thread()
+        ):
+            self._previous_sigterm_handler = signal.signal(signal.SIGTERM, signal.default_int_handler)
+            self._sigterm_installed = True
+
+    def notice(self, text: str) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.console.write(f"\n{sanitize_text(text)}\n")
 
     def join(self, timeout: float | None = None) -> None:
         with self._lock:
@@ -331,7 +461,8 @@ class ConsoleOwner:
             discard()
 
     def _prompt_text(self, prompt: _Prompt) -> str:
-        return f"[{prompt.prompt_id}] {prompt.text} [Y/N]: "
+        seconds = f" ({prompt.timeout:g} seconds)" if prompt.timeout is not None else ""
+        return f"{sanitize_text(prompt.text)} Type Y or N, then Enter{seconds}: "
 
     def _show_prompt_locked(self, prompt: _Prompt) -> None:
         if self._closed or self._active is not prompt or prompt.expired:
@@ -460,13 +591,18 @@ class ConsoleOwner:
         return line.text, prompt
 
     def _stop(self) -> None:
+        with self._lock:
+            if self._closed or self._stopped:
+                return
+            self._stopped = True
         self.on_stop()
         self.close()
+        self.console.write("Stopping now...\n")
 
     def _run_startup(self, consent_prompt: str) -> None:
         consent = None
         try:
-            consent = self.console.read_line(_timestamped(consent_prompt))
+            consent = self.console.read_line(consent_prompt)
         except KeyboardInterrupt:
             consent = None
         except Exception as exc:
@@ -474,22 +610,22 @@ class ConsoleOwner:
             self._startup_ready.set()
             self.close()
             return
-        if consent is None:
+        if consent is None or consent.strip() in ("S", "s"):
             self.on_stop()
         self._startup_answer = consent
         self._startup_ready.set()
-        self._startup_resume.wait()
+        if consent is None or consent.strip().casefold() != "y":
+            self._startup_resume.wait()
         if not self._closed:
             self._run()
 
     def _edit_help(self) -> None:
         while not self._closed:
             text, prompt = self._read_line("Help message, or Escape to cancel: ")
+            if text is not None and text.strip() == "S":
+                self._stop()
+                return
             if prompt is not None:
-                if text in ("S", "s"):
-                    self._deliver_prompt(prompt, "")
-                    self._stop()
-                    return
                 if text == "\x1b":
                     self._deliver_prompt(prompt, "")
                     self.console.write("Help request cancelled.\n")
@@ -500,9 +636,6 @@ class ConsoleOwner:
             if text == "\x1b":
                 self.console.write("Help request cancelled.\n")
                 return
-            if text in ("S", "s"):
-                self._stop()
-                return
             if not text:
                 self.console.write("Help message cannot be empty.\n")
                 continue
@@ -512,14 +645,20 @@ class ConsoleOwner:
 
     def _run(self) -> None:
         while not self._closed:
-            line, prompt = self._read_line("Press S to stop or H to ask for help: ")
+            line, prompt = self._read_line("Type S and press Enter to stop, or H and press Enter to send a message: ")
+            if line is not None:
+                line = line.strip()
             if prompt is not None:
                 if line in ("S", "s"):
-                    self._deliver_prompt(prompt, line)
                     self._stop()
                     return
-                self._deliver_prompt(prompt, "" if line == "H" else line)
-                if line == "H":
+                if line is None:
+                    return
+                if line not in ("Y", "y", "N", "n", "H", "h", ""):
+                    self.console.write("Please type Y or N\n")
+                    continue
+                self._deliver_prompt(prompt, "" if line in ("H", "h") else line)
+                if line in ("H", "h"):
                     self._edit_help()
                 continue
             if line is None:
@@ -527,5 +666,7 @@ class ConsoleOwner:
             if line in ("S", "s"):
                 self._stop()
                 return
-            if line == "H":
+            if line in ("H", "h"):
                 self._edit_help()
+            elif line:
+                self.console.write("Type S and press Enter to stop.\n")

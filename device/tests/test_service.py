@@ -1,6 +1,9 @@
 import shutil
 import subprocess
+import sys
 from xml.etree import ElementTree
+
+import pytest
 
 from hermeshands_device import service
 
@@ -20,7 +23,7 @@ def test_install_service_calls_schtasks_with_xml(monkeypatch, tmp_path):
     monkeypatch.setattr(service.os, "environ", {"USERDOMAIN": "LAPTOP", "USERNAME": "A User"})
     monkeypatch.setattr(service.Path, "home", lambda: service.Path(r"C:\Users\A User"))
     calls = []
-    monkeypatch.setattr(service.subprocess, "run", lambda args, check: calls.append((args, check)) or subprocess.CompletedProcess(args, 0))
+    monkeypatch.setattr(service.subprocess, "run", lambda args, check, **kwargs: calls.append((args, check)) or subprocess.CompletedProcess(args, 0))
     assert service.install() == 0
     assert calls[0][0][:3] == ["schtasks", "/Create", "/XML"]
     assert calls[0][0][3].endswith("task.xml")
@@ -36,7 +39,7 @@ def test_install_service_uses_absolute_pythonw_and_ignores_cwd_command(monkeypat
     monkeypatch.setattr(service.Path, "home", lambda: service.Path(r"C:\Users\A User"))
     calls = []
 
-    def run(args, check):
+    def run(args, check, **kwargs):
         xml = ElementTree.fromstring(service.Path(args[3]).read_bytes())
         calls.append((args, check, xml))
         return subprocess.CompletedProcess(args, 0)
@@ -67,6 +70,77 @@ def test_install_service_dry_run_prints_command_without_running(monkeypatch, tmp
     assert "LAPTOP\\A User" in output
     assert str(pythonw) in output
     assert "-I -m hermeshands_device.cli serve --service" in output
+
+
+@pytest.mark.parametrize("remove", [False, True])
+def test_install_service_sanitizes_dynamic_dry_run_output(monkeypatch, tmp_path, capsys, remove):
+    dirty = "before\x1b[1A\x1b[2K\u202eafter"
+    monkeypatch.setattr(service.sys, "platform", "win32")
+    _set_python_interpreter(monkeypatch, tmp_path)
+    monkeypatch.setattr(service.os, "environ", {"USERDOMAIN": "LAPTOP", "USERNAME": f"A User{dirty}"})
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path / f"Home {dirty}")
+    monkeypatch.setattr(service.tempfile, "tempdir", str(tmp_path))
+    xml_seen = []
+
+    def list2cmdline(args):
+        if not remove:
+            xml_seen.append(service.Path(args[3]).read_text(encoding="utf-16"))
+        return f"schtasks\t{dirty}\nnext"
+
+    monkeypatch.setattr(service.subprocess, "list2cmdline", list2cmdline)
+    monkeypatch.setattr(service.subprocess, "run", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert service.install(dry_run=True, remove=remove) == 0
+    output = capsys.readouterr().out
+    assert "\x1b" not in output
+    assert "\u202e" not in output
+    assert "schtasks\tbeforeafter\nnext\n" in output
+    if not remove:
+        assert "LAPTOP\\A Userbeforeafter" in output
+        assert str(tmp_path / "Home beforeafter") in output
+        assert '<?xml version="1.0" encoding="UTF-16"?>\n' in output
+        assert dirty in xml_seen[0]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the oem codec exists only on Windows")
+@pytest.mark.parametrize("remove", [False, True])
+def test_install_service_sanitizes_scheduler_output(monkeypatch, tmp_path, capsys, remove):
+    monkeypatch.setattr(service.sys, "platform", "win32")
+    _set_python_interpreter(monkeypatch, tmp_path)
+    monkeypatch.setattr(service.os, "environ", {"USERDOMAIN": "LAPTOP", "USERNAME": "A User"})
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path)
+    dirty = "before\x1b[1A\x1b[2K\x00 after\r\n".encode("oem")
+    calls = []
+
+    def run(args, **kwargs):
+        calls.append(kwargs)
+        return subprocess.CompletedProcess(args, 7, stdout=dirty, stderr=dirty)
+
+    monkeypatch.setattr(service.subprocess, "run", run)
+    assert service.install(remove=remove) == 7
+    output = capsys.readouterr()
+    assert output.out.endswith("\nbefore after\n")
+    assert output.err == "before after\n"
+    assert calls == [{"check": False, "capture_output": True}]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the oem codec exists only on Windows")
+@pytest.mark.parametrize("remove", [False, True])
+def test_install_service_keeps_accents_and_line_breaks_of_scheduler_output(monkeypatch, tmp_path, capsys, remove):
+    monkeypatch.setattr(service.sys, "platform", "win32")
+    _set_python_interpreter(monkeypatch, tmp_path)
+    monkeypatch.setattr(service.os, "environ", {"USERDOMAIN": "LAPTOP", "USERNAME": "A User"})
+    monkeypatch.setattr(service.Path, "home", lambda: tmp_path)
+    stdout = "Op\u00e9ration r\u00e9ussie.\r\n".encode("oem")
+    stderr = "ERREUR : t\u00e2che mal form\u00e9e.\r\r\n(1,2):Task:\r\n".encode("oem")
+    monkeypatch.setattr(
+        service.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout=stdout, stderr=stderr),
+    )
+    assert service.install(remove=remove) == 1
+    output = capsys.readouterr()
+    assert output.out.endswith("\nOp\u00e9ration r\u00e9ussie.\n")
+    assert output.err == "ERREUR : t\u00e2che mal form\u00e9e.\n(1,2):Task:\n"
 
 
 def test_install_service_passes_allow_screen_to_task(monkeypatch, tmp_path, capsys):
@@ -101,7 +175,7 @@ def test_install_service_refuses_without_pythonw(monkeypatch, tmp_path, capsys):
 def test_remove_service_command(monkeypatch):
     monkeypatch.setattr(service.sys, "platform", "win32")
     calls = []
-    monkeypatch.setattr(service.subprocess, "run", lambda args, check: calls.append(args) or subprocess.CompletedProcess(args, 0))
+    monkeypatch.setattr(service.subprocess, "run", lambda args, check, **kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0))
     assert service.install(remove=True) == 0
     assert calls == [["schtasks", "/Delete", "/TN", "HermesHands", "/F"]]
 

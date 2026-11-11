@@ -23,10 +23,11 @@ import threading
 import weakref
 
 from gateway.session_context import get_session_env
-from tools.environments.base import BaseEnvironment
+from tools.environments.base import BaseEnvironment, FileFetchError
 from tools.environments.local import LocalEnvironment
+from tools.process_registry_env_log import log_delta_command
 
-from . import messages, store, targets
+from . import messages, store, targets, witness
 from .handle import RemoteProcessHandle
 from .relay import UNREACHABLE
 
@@ -42,6 +43,13 @@ _BACKGROUND_LAUNCH = re.compile(r"\) & echo \$! > (.+) && cat \1\Z")
 # One shell word of a file-tool command: single-quoted as core's file tools quote arguments
 # (file_operations.py:535-557), or a bare word ``shlex.quote`` left unquoted.
 _SHELL_WORD = r"'(?:[^']|'\"'\"')*'|[\w@%+=:,./-]+"
+# The poller's liveness probe and exit read (process_registry.py:1460, 1465), and the start of its
+# log read (process_registry_env_log.py:17-18), each naming one job file.
+_BACKGROUND_PROBE = re.compile(
+    rf'kill -0 "\$\(cat ({_SHELL_WORD}) 2>/dev/null\)" 2>/dev/null; echo \$\?'
+)
+_BACKGROUND_EXIT = re.compile(rf"cat ({_SHELL_WORD}) 2>/dev/null")
+_BACKGROUND_LOG = re.compile(rf"O=(\d+); S=\$\(\{{ wc -c < ({_SHELL_WORD}); \}}")
 _WORD = re.compile(r"'((?:[^']|'\"'\"')*)'|(?<![^\s<>|;&(])([\w@%+=:,./-]+)(?=[\s<>|;&)]|\Z)")
 # The start of core's atomic write (file_operations.py:586-606): its parent and target.
 _ATOMIC_WRITE = re.compile(rf"set -e; d=({_SHELL_WORD}); t=({_SHELL_WORD}); ")
@@ -112,14 +120,46 @@ def _hands_failure(result: dict) -> bool:
     )
 
 
-def _from_file_tools() -> bool:
-    """File tools do not name the call (file_operations.py:229-239). A terminal command and execute_code keep the full deny-list."""
+def _called_from(module: str) -> bool:
+    """Whether core's ``module`` made this call. File tools do not name the call (file_operations.py:
+    229-239), nor does the oversized-result spill (tool_result_storage.py:225-246, 323-345). A
+    terminal command and execute_code keep the full deny-list."""
     frame = sys._getframe()
     while frame is not None:
-        if str(frame.f_globals.get("__name__", "")).startswith("tools.file_operations"):
+        if str(frame.f_globals.get("__name__", "")).startswith(module):
             return True
         frame = frame.f_back
     return False
+
+
+def _job_file(word: str, ext: str) -> str | None:
+    """The registry session a job file names, when ``word`` is that file exactly as core quotes it."""
+    path = shlex.split(word)[0]
+    name = re.fullmatch(rf"hermes_bg_([\w-]+)\.{ext}", posixpath.basename(path))
+    return name.group(1) if name is not None and shlex.quote(path) == word else None
+
+
+def _registry_command(command: str) -> tuple[str, str] | None:
+    """Core's own background kill, liveness probe, exit read or log read, matched whole
+    (process_registry.py:1427, 1460, 1465, 2246): ``("kill", pid)`` or ``(kind, registry session)``.
+    None for any other command, however much of a job file it names."""
+    kill = _BACKGROUND_KILL.fullmatch(command)
+    if kill is not None:
+        return "kill", kill.group(1)
+    probe = _BACKGROUND_PROBE.fullmatch(command)
+    if probe is not None:
+        job = _job_file(probe.group(1), "pid")
+        return None if job is None else ("probe", job)
+    exit_read = _BACKGROUND_EXIT.fullmatch(command)
+    if exit_read is not None:
+        job = _job_file(exit_read.group(1), "exit")
+        return None if job is None else ("exit", job)
+    poll = _BACKGROUND_LOG.match(command)
+    if poll is not None and command == log_delta_command(poll.group(2), int(poll.group(1))):
+        job = _job_file(poll.group(2), "log")
+        return None if job is None else ("log", job)
+    return None
+
 
 class DeviceEnvironment(BaseEnvironment):
     """A paired device: core's spawn-per-call flow, with every bash run sent to the device as a job."""
@@ -259,7 +299,7 @@ class DeviceEnvironment(BaseEnvironment):
         terminal = kwargs.get("bounded_capture")
         if not terminal and _BACKGROUND_FILE.search(command) is None:
             command = self._file_command(command)
-        file_op = (not terminal) and _from_file_tools()
+        file_op = (not terminal) and _called_from("tools.file_operations")
         token = _INLINE_LIMIT.set(self.inline_limit if terminal else None)
         file_token = _FILE_OP.set(file_op)
         try:
@@ -427,23 +467,28 @@ class HandsEnvironment(BaseEnvironment):
             inline_limit=int(self._ctx.get_config("inline_output_limit_bytes", 1048576)),
         )
 
-    def _background_owner(self, command: str) -> str | None:
-        """The target a background job's poll or kill belongs to, whatever the session chose since.
-        Core's kill names only the pid (process_registry.py:2245-2246): a pid launched on two targets
-        is refused, which core reports as a failed kill and keeps the job tracked (:2156-2220)."""
+    def _background_owner(self, command: str) -> tuple[str, str, str] | None:
+        """The target one of core's own registry commands belongs to, whatever the session chose
+        since, with what :func:`_registry_command` read from it. Core's kill names only the pid
+        (process_registry.py:2245-2246): a pid launched on two targets is refused, which core reports
+        as a failed kill and keeps the job tracked (:2156-2220). A registry command for a job that
+        has ended, or that this object never launched, runs nowhere: core records a poll that raises
+        as a lost job, which keeps a kill's own result (:1471-1475, 642-650)."""
+        registry = _registry_command(command)
+        if registry is None:
+            return None
+        kind, value = registry
         with self._lock:
-            match = _BACKGROUND_FILE.search(command)
-            if match is not None:
-                known = self._background.get(match.group(1))
-                return None if known is None else known[0]
-            match = _BACKGROUND_KILL.fullmatch(command.strip())
-            if match is None:
-                return None
-            pid = int(match.group(1))
-            owners = sorted(self._background_pids.get(pid, ()))
+            if kind == "kill":
+                owners = sorted(self._background_pids.get(int(value), ()))
+            else:
+                known = self._background.get(value)
+                owners = [] if known is None else [known[0]]
         if len(owners) > 1:
-            raise RuntimeError(messages.ambiguous_pid(pid, owners))
-        return owners[0] if owners else None
+            raise RuntimeError(messages.ambiguous_pid(int(value), owners))
+        if not owners:
+            raise RuntimeError(messages.BACKGROUND_JOB_ENDED)
+        return owners[0], kind, value
 
     def _record_background(self, session_id: str, target: str, result: dict) -> None:
         """A launch: remember where it runs and its pid, parsed as core parses it
@@ -455,16 +500,21 @@ class HandsEnvironment(BaseEnvironment):
             if pid is not None:
                 self._background_pids.setdefault(pid, set()).add(target)
 
-    def _job_ended(self, target: str, pid: int) -> None:
-        """A job's pid stops counting once the job has ended, so a pid shared with it routes again."""
+    def _job_ended(self, session_ids: list[str]) -> None:
+        """Ended jobs lose their route, and their pids stop counting, so a pid shared with one of them
+        routes again."""
         with self._lock:
-            owners = self._background_pids.get(pid)
-            if owners is not None:
-                owners.discard(target)
-                if not owners:
-                    del self._background_pids[pid]
+            for session_id in session_ids:
+                target, pid = self._background.pop(session_id, (None, None))
+                owners = self._background_pids.get(pid)
+                if owners is not None:
+                    owners.discard(target)
+                    if not owners:
+                        del self._background_pids[pid]
 
-    def _routed(self, owner: str, command: str, cwd: str, kwargs: dict) -> dict:
+    def _routed(
+        self, owner: str, kind: str, value: str, command: str, cwd: str, kwargs: dict
+    ) -> dict:
         """A registry poll or kill on the target that runs the job (process_registry.py:1418-1470,
         2245-2246). A result the gateway half made up is never read as the job's state: core takes
         anything but "0" from the liveness probe as an exit and writes "killed" whatever the kill
@@ -474,23 +524,23 @@ class HandsEnvironment(BaseEnvironment):
         result = self._sub(owner)[1].execute(command, cwd, **kwargs)
         output = result.get("output") or ""
         lines = output.strip().splitlines()
-        kill = _BACKGROUND_KILL.fullmatch(command.strip())
-        job = _BACKGROUND_FILE.search(command)
-        if kill is not None:
+        if kind == "kill":
             if _hands_failure(result):
                 raise RuntimeError(lines[-1])
-            self._job_ended(owner, int(kill.group(1)))
+            with self._lock:
+                killed = [
+                    job for job, run in self._background.items() if run == (owner, int(value))
+                ]
+            self._job_ended(killed)
             return result
-        pid = None if job is None else self._background.get(job.group(1), (owner, None))[1]
-        if not command.startswith("kill -0 "):
-            if command.startswith("cat ") and ".exit" in command and pid is not None:
-                self._job_ended(owner, pid)
+        if kind != "probe":
+            if kind == "exit":
+                self._job_ended([value])
             return result
         if result.get("returncode") == 0 and lines and lines[-1].strip().lstrip("-").isdigit():
             return result
         if any(text in output for text in self._gone(owner)):
-            if pid is not None:
-                self._job_ended(owner, pid)  # core records the job as lost
+            self._job_ended([value])  # core records the job as lost
             raise RuntimeError(lines[-1])
         return {"output": "0", "returncode": 0}
 
@@ -557,17 +607,22 @@ class HandsEnvironment(BaseEnvironment):
         # Only the foreground terminal tool sets bounded_capture (base.py:679-681): its command runs on
         # this conversation's target exactly as approved, and only it moves the session's cwd record.
         terminal = bool(kwargs.get("bounded_capture"))
-        launch = None if terminal else _BACKGROUND_LAUNCH.search(command)
-        owner = None if terminal or launch else self._background_owner(command)
+        # A file tool's command can name a job file, but only the registry polls and kills a job.
+        registry = not terminal and not _called_from("tools.file_operations")
+        launch = _BACKGROUND_LAUNCH.search(command) if registry else None
+        owner = self._background_owner(command) if registry and launch is None else None
         if owner is not None:
             # The process registry polls and kills through this object (process_registry.py:1279,
             # 1418-1466, 2245-2246); its job lives on the sub-environment that launched it.
-            return self._routed(owner, command, cwd, kwargs)
+            return self._routed(*owner, command, cwd, kwargs)
         note = None
         try:
             # Every store read happens before the command runs: an error after it would make the
             # terminal tool retry, i.e. run the command again (terminal_tool.py:1363-1390).
             target, sub = self._resolve()
+            if _called_from("tools.tool_result_storage") and witness._witness_device(self._ctx):
+                # Core keeps the oversized result inline instead (tool_result_storage.py:434-437).
+                return {"output": messages.WITNESS_RESULT_KEPT, "returncode": 1}
             # The file tools parse their raw output, so the note never goes there.
             noted = (target, get_session_env("HERMES_SESSION_ID", ""))
             if terminal and noted != self._noted:
@@ -617,11 +672,20 @@ class HandsEnvironment(BaseEnvironment):
         except sqlite3.Error:
             self._store_failed()
 
+    def _media_source(self) -> BaseEnvironment:
+        """The target a MEDIA: line in the model's reply is fetched from (gateway/media_fetch.py:
+        99-108). The fetch passes no tool call and so no approval, so an active witness device
+        refuses it; the gateway logs the refusal and delivers nothing."""
+        sub = self._resolve()[1]
+        if witness._witness_device(self._ctx) is not None:
+            raise FileFetchError(messages.WITNESS_MEDIA_BLOCKED)
+        return sub
+
     def fetch_file(self, remote_path, local_dest, *, max_bytes: int) -> None:
-        self._resolve()[1].fetch_file(remote_path, local_dest, max_bytes=max_bytes)
+        self._media_source().fetch_file(remote_path, local_dest, max_bytes=max_bytes)
 
     def fetch_realpath(self, remote_path: str) -> str | None:
-        return self._resolve()[1].fetch_realpath(remote_path)
+        return self._media_source().fetch_realpath(remote_path)
 
     def get_temp_dir(self) -> str:
         return self._current()[1].get_temp_dir()

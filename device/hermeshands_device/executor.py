@@ -8,6 +8,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import tempfile
 import time
@@ -26,7 +27,112 @@ TASKKILL_TIMEOUT = 10
 _PROBED: dict[str, tuple[int, int, int]] = {}  # file identity for candidates whose probe passed
 _WINDOWS_JOBS: dict[int, int] = {}
 _WINDOWS_JOBS_LOCK = threading.Lock()
+_WINDOWS_REAPING: dict[int, int] = {}
+_WINDOWS_REAPER: threading.Thread | None = None
 _CREATE_SUSPENDED = 0x00000004
+_POSIX_GROUPS: dict[int, float] = {}
+_POSIX_MEMBERS: dict[int, dict[int, float]] = {}
+_POSIX_GROUPS_LOCK = threading.Lock()
+_POSIX_GUARDIAN: subprocess.Popen | None = None
+_POSIX_GUARDIAN_TIMEOUT = 2.0
+_POSIX_CONTINUITY_WINDOW = 1.0
+_LINUX = sys.platform.startswith("linux")
+_POSIX_LAUNCH_CODE = (
+    "import os,signal,sys; fd=int(sys.argv[1]); ready=os.read(fd,1); os.close(fd); ready == b'1' or sys.exit(130); "
+    "[signal.signal(getattr(signal, name), signal.SIG_DFL) for name in ('SIGPIPE', 'SIGXFSZ') if hasattr(signal, name)]; "
+    "os.execv(sys.argv[2],sys.argv[2:])"
+)
+_POSIX_GUARDIAN_CODE = f"window = {_POSIX_CONTINUITY_WINDOW!r}\n" + r'''
+import json, os, select, signal, sys, time
+import psutil
+signal.signal(signal.SIGINT, signal.SIG_IGN)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
+linux = sys.platform.startswith("linux")
+groups = {}
+seen = {}
+def start(pid):
+    if linux:
+        with open("/proc/%d/stat" % pid, "rb") as stat:
+            return float(stat.read().rsplit(b")", 1)[1].split()[19])
+    return psutil.Process(pid).create_time()
+def refresh_all(targets):
+    found = {}
+    for pgid, members in targets.items():
+        live = {}
+        for pid, created in members.items():
+            try:
+                current = start(pid)
+                if (current == created if linux else abs(current - created) <= 0.01) and os.getpgid(pid) == pgid:
+                    live[pid] = created
+            except (psutil.Error, OSError):
+                pass
+        # The pgid number stays reserved while any process uses it as a group or session id, so a group
+        # seen moments ago is still ours while its session has members, even after every recorded one exited.
+        continued = not live and members and time.monotonic() - seen.get(pgid, float("-inf")) <= window and not psutil.pid_exists(pgid)
+        found[pgid] = (live, continued)
+    # One process scan serves every group. It runs after the recorded members were checked, so a child
+    # forked before they exited is in it; each candidate is checked again below.
+    candidates = {}
+    if any(live or continued for live, continued in found.values()):
+        for proc in psutil.process_iter():
+            try:
+                candidates.setdefault(os.getpgid(proc.pid), []).append(proc.pid)
+            except (psutil.Error, OSError):
+                pass
+    for pgid, (live, continued) in found.items():
+        for pid in candidates.get(pgid, ()) if live or continued else ():
+            try:
+                if os.getpgid(pid) == pgid and (not continued or os.getsid(pid) == pgid):
+                    live[pid] = start(pid)
+            except (psutil.Error, OSError):
+                pass
+        if live:
+            seen[pgid] = time.monotonic()
+        else:
+            seen.pop(pgid, None)
+    return {pgid: live for pgid, (live, _) in found.items()}
+def refresh(pgid, members):
+    return refresh_all({pgid: members})[pgid]
+def kill(targets):
+    for pgid, live in refresh_all(targets).items():
+        if live:
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except OSError:
+                pass
+print("ready", flush=True)
+next_pass = float("-inf")
+while True:
+    if time.monotonic() >= next_pass:
+        groups.update(refresh_all(groups))
+        next_pass = time.monotonic() + 0.1
+    ready, _, _ = select.select([sys.stdin], [], [], max(0, next_pass - time.monotonic()))
+    if not ready:
+        continue
+    line = sys.stdin.readline()
+    if not line:
+        break
+    action, pgid, *created = line.split()
+    pgid = int(pgid)
+    if action in ("add", "set"):
+        members = {int(pid): value for pid, value in json.loads(created[1]).items()} if len(created) > 1 else {pgid: float(created[0])}
+        if action == "add":
+            seen.pop(pgid, None)
+        groups[pgid] = refresh(pgid, members)
+    elif action == "check" and pgid in groups:
+        groups[pgid] = refresh(pgid, groups[pgid])
+    elif action == "checkall":
+        groups.update(refresh_all(groups))
+    elif action == "kill":
+        kill({pgid: groups.pop(pgid, {})})
+    elif action == "killall":
+        kill(groups)
+        groups.clear()
+    elif action == "del":
+        groups.pop(pgid, None)
+    print("ack " + json.dumps(groups if action == "checkall" else groups.get(pgid, {})), flush=True)
+kill(groups)
+'''
 
 
 def _is_stub(path: str) -> bool:
@@ -78,6 +184,8 @@ def _terminate(proc: subprocess.Popen, start_time: float) -> None:
     if os.name == "nt":
         terminate_recorded(proc.pid, start_time)
         return
+    if not _posix_group_is_ours(proc.pid, start_time):
+        return
     try:
         os.killpg(proc.pid, signal.SIGKILL)  # windows-footgun: ok -- POSIX-only branch
     except ProcessLookupError:
@@ -86,6 +194,242 @@ def _terminate(proc: subprocess.Popen, start_time: float) -> None:
         logging.getLogger(__name__).warning(
             "Could not kill process group %s: %s", proc.pid, exc
         )
+
+
+def _start_time(pid: int) -> float:
+    # Linux start ticks count from boot, so a wall clock step cannot change them as it changes create_time.
+    if _LINUX:
+        with open(f"/proc/{pid}/stat", "rb") as stat:
+            return float(stat.read().rsplit(b")", 1)[1].split()[19])
+    return psutil.Process(pid).create_time()
+
+
+def _same_start(pid: int, start_time: float) -> bool:
+    current = _start_time(pid)
+    return current == start_time if _LINUX else abs(current - start_time) <= 0.01
+
+
+def _boot_id() -> str | None:
+    try:
+        return Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+    except OSError:
+        return None
+
+
+def _posix_group_is_ours(pgid: int, start_time: float, scan: bool = True) -> bool:
+    members = _POSIX_MEMBERS.get(pgid, {pgid: start_time})
+    live = {}
+    for pid, created in members.items():
+        try:
+            if _same_start(pid, created) and os.getpgid(pid) == pgid:
+                live[pid] = created
+        except (psutil.Error, OSError):
+            continue
+    if not live:
+        _POSIX_MEMBERS.pop(pgid, None)
+        return False
+    for process in psutil.process_iter() if scan else ():
+        try:
+            if os.getpgid(process.pid) == pgid:
+                live[process.pid] = _start_time(process.pid)
+        except (psutil.Error, OSError):
+            continue
+    _POSIX_MEMBERS[pgid] = live
+    return True
+
+
+def _forget_posix_group(pgid: int) -> None:
+    _POSIX_GROUPS.pop(pgid, None)
+    _POSIX_MEMBERS.pop(pgid, None)
+    for process in psutil.process_iter():
+        try:
+            if os.getpgid(process.pid) == pgid:
+                logging.getLogger(__name__).warning("Process group %s still has processes the agent cannot prove it started; they are left running", pgid)
+                return
+        except (psutil.Error, OSError):
+            continue
+
+
+def _leader_running(proc: subprocess.Popen, start_time: float) -> bool:
+    # Only run() reaps the leader, so until then its pid cannot belong to another process.
+    if os.name == "nt" or proc.returncode is not None:
+        return proc.poll() is None
+    try:
+        return psutil.Process(proc.pid).status() != psutil.STATUS_ZOMBIE
+    except psutil.NoSuchProcess:
+        return False
+
+
+def _record_posix_group_at_exit(pgid: int, start_time: float) -> None:
+    # The exited leader is still unreaped, so no other group can hold its id while we scan.
+    try:
+        if psutil.Process(pgid).status() != psutil.STATUS_ZOMBIE:
+            return
+    except psutil.Error:
+        return
+    members = {pgid: start_time}
+    for process in psutil.process_iter():
+        try:
+            if os.getpgid(process.pid) == pgid:
+                members[process.pid] = _start_time(process.pid)
+        except (psutil.Error, OSError):
+            continue
+    with _POSIX_GROUPS_LOCK:
+        if _POSIX_GROUPS.get(pgid) != start_time:
+            return
+        _POSIX_MEMBERS[pgid] = members
+        if len(members) > 1:
+            try:
+                _send_to_posix_guardian(f"set {pgid} {start_time!r}\n")
+            except RuntimeError as exc:
+                logging.getLogger(__name__).warning("Could not update job guardian: %s", exc)
+
+
+class _GuardianStalled(RuntimeError):
+    pass
+
+
+def _guardian_ack(expected: str, deadline: float) -> str:
+    guardian = _POSIX_GUARDIAN
+    ready, _, _ = select.select([guardian.stdout], [], [], max(0, deadline - time.monotonic()))
+    if not ready:
+        raise _GuardianStalled("The job guardian did not answer in time")
+    response = guardian.stdout.readline().strip()
+    if response.split(" ", 1)[0] != expected:
+        raise RuntimeError("The job guardian did not acknowledge protection")
+    return response
+
+
+def _send_to_posix_guardian(line: str, deadline: float | None = None) -> None:
+    global _POSIX_GUARDIAN
+    if deadline is None:
+        deadline = time.monotonic() + _POSIX_GUARDIAN_TIMEOUT
+    commands = [(command, True) for command in line.splitlines()]
+    try:
+        if _POSIX_GUARDIAN is None or _POSIX_GUARDIAN.poll() is not None:
+            _POSIX_GUARDIAN = subprocess.Popen(
+                [sys.executable, "-I", "-u", "-c", _POSIX_GUARDIAN_CODE],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                start_new_session=True, text=True, bufsize=1,
+            )
+            _guardian_ack("ready", deadline)
+            registering = {int(command.split()[1]) for command, _ in commands if command.split()[0] in ("add", "set")}
+            restored = []
+            for pgid, created in list(_POSIX_GROUPS.items()):
+                if pgid in registering:
+                    continue
+                if _posix_group_is_ours(pgid, created):
+                    restored.append((f"add {pgid} {created!r}", False))
+                else:
+                    _forget_posix_group(pgid)
+            commands = restored + commands
+        for command, required in commands:
+            parts = command.split()
+            if parts[0] in ("add", "set"):
+                pgid = int(parts[1])
+                members = _POSIX_MEMBERS.get(pgid, {pgid: float(parts[2])})
+                command += " " + json.dumps(members, separators=(",", ":"))
+            _POSIX_GUARDIAN.stdin.write(command + "\n")
+            _POSIX_GUARDIAN.stdin.flush()
+            response = _guardian_ack("ack", deadline)
+            members = json.loads(response.split(" ", 1)[1])
+            if parts[0] == "checkall":
+                for old in _POSIX_GROUPS:
+                    _POSIX_MEMBERS[old] = {int(pid): created for pid, created in members.get(str(old), {}).items()}
+                continue
+            pgid = int(parts[1])
+            if parts[0] == "add" and not members:
+                if required:
+                    raise RuntimeError("The job guardian could not identify the protected process")
+                _forget_posix_group(pgid)
+                continue
+            _POSIX_MEMBERS[pgid] = {int(pid): created for pid, created in members.items()}
+    except (OSError, ValueError, RuntimeError) as exc:
+        guardian, _POSIX_GUARDIAN = _POSIX_GUARDIAN, None
+        # A guardian that only answered late about earlier jobs is killed outright, so its exit cleanup cannot
+        # end those jobs; they stay tracked and the next job's guardian takes them back if they are still ours.
+        stalled = isinstance(exc, _GuardianStalled) and bool(commands) and all(command.split()[0] in ("checkall", "del") for command, _ in commands)
+        if guardian is not None and stalled:
+            try:
+                guardian.kill()
+                guardian.wait(timeout=0.2)
+            except (OSError, subprocess.TimeoutExpired) as cleanup_error:
+                logging.getLogger(__name__).warning("Could not finish job guardian cleanup: %s", cleanup_error)
+            finally:
+                guardian.stdin.close()
+                guardian.stdout.close()
+            raise RuntimeError("Could not establish job guardian protection") from exc
+        if guardian is not None:
+            try:
+                guardian.stdin.close()
+                guardian.wait(timeout=max(0, min(0.2, deadline - time.monotonic())))
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    guardian.kill()
+                    guardian.wait(timeout=max(0, min(0.2, deadline - time.monotonic())))
+                except (OSError, subprocess.TimeoutExpired) as cleanup_error:
+                    logging.getLogger(__name__).warning("Could not finish job guardian cleanup: %s", cleanup_error)
+            finally:
+                guardian.stdout.close()
+        for pgid, created in list(_POSIX_GROUPS.items()):
+            if not _posix_group_is_ours(pgid, created):
+                _forget_posix_group(pgid)
+                continue
+            try:
+                os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok -- POSIX-only caller
+            except OSError as kill_error:
+                logging.getLogger(__name__).warning("Could not kill process group %s: %s", pgid, kill_error)
+        raise RuntimeError("Could not establish job guardian protection") from exc
+
+
+def _track_posix_group(pgid: int, start_time: float) -> None:
+    with _POSIX_GROUPS_LOCK:
+        deadline = time.monotonic() + _POSIX_GUARDIAN_TIMEOUT
+        if _POSIX_GROUPS:
+            _send_to_posix_guardian("checkall 0\n", deadline)
+        for old, old_start in list(_POSIX_GROUPS.items()):
+            if not _posix_group_is_ours(old, old_start, scan=False):
+                _POSIX_GROUPS.pop(old, None)
+                _send_to_posix_guardian(f"del {old}\n", deadline)
+        _POSIX_GROUPS[pgid] = start_time
+        _POSIX_MEMBERS[pgid] = {pgid: start_time}
+        _posix_group_is_ours(pgid, start_time)
+        _send_to_posix_guardian(f"add {pgid} {start_time!r}\n", time.monotonic() + _POSIX_GUARDIAN_TIMEOUT)
+
+
+def _terminate_posix_groups(deadline: float | None = None) -> None:
+    if os.name == "nt":
+        return
+    if deadline is None:
+        deadline = time.monotonic() + _POSIX_GUARDIAN_TIMEOUT
+    if not _POSIX_GROUPS_LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+        guardian = _POSIX_GUARDIAN
+        if guardian is not None:
+            try:
+                guardian.stdin.close()
+            except (OSError, ValueError) as exc:
+                logging.getLogger(__name__).warning("Could not close job guardian input during cleanup: %s", exc)
+        logging.getLogger(__name__).warning("Process group cleanup reached its deadline; the guardian will finish cleanup")
+        return
+    try:
+        for pgid, start_time in list(_POSIX_GROUPS.items()):
+            if _posix_group_is_ours(pgid, start_time):
+                try:
+                    os.killpg(pgid, signal.SIGKILL)  # windows-footgun: ok -- POSIX-only branch
+                except ProcessLookupError:
+                    pass
+                except OSError as exc:
+                    logging.getLogger(__name__).warning("Could not kill process group %s: %s", pgid, exc)
+            del _POSIX_GROUPS[pgid]
+            _POSIX_MEMBERS.pop(pgid, None)
+        if _POSIX_GUARDIAN is not None:
+            try:
+                _send_to_posix_guardian("killall 0\n", deadline)
+                _POSIX_MEMBERS.pop(0, None)
+            except RuntimeError as exc:
+                logging.getLogger(__name__).warning("Could not reach job guardian during cleanup: %s", exc)
+    finally:
+        _POSIX_GROUPS_LOCK.release()
 
 
 def _windows_job_name(pid: int, start_time: float) -> str:
@@ -149,19 +493,29 @@ def _windows_job_has_active_processes(job: int) -> bool:
     return bool(queried and info.ActiveProcesses)
 
 
-def _wait_for_windows_job_exit(pid: int, job: int) -> None:
+def _wait_for_windows_job_exit() -> None:
+    global _WINDOWS_REAPER
     while True:
         with _WINDOWS_JOBS_LOCK:
-            if _WINDOWS_JOBS.get(pid) != job:
-                return
-            if not _windows_job_has_active_processes(job):
-                del _WINDOWS_JOBS[pid]
-                import ctypes
-                from ctypes import wintypes
+            for pid, job in list(_WINDOWS_REAPING.items()):
+                if _WINDOWS_JOBS.get(pid) != job:
+                    del _WINDOWS_REAPING[pid]
+                    continue
+                try:
+                    if _windows_job_has_active_processes(job):
+                        continue
+                    import ctypes
+                    from ctypes import wintypes
 
-                kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-                kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-                kernel32.CloseHandle(wintypes.HANDLE(job))
+                    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+                    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+                    kernel32.CloseHandle(wintypes.HANDLE(job))
+                    del _WINDOWS_JOBS[pid]
+                    del _WINDOWS_REAPING[pid]
+                except OSError as exc:
+                    logging.getLogger(__name__).warning("Could not reap Windows job %s: %s", pid, exc)
+            if not _WINDOWS_REAPING:
+                _WINDOWS_REAPER = None
                 return
         time.sleep(0.1)
 
@@ -233,7 +587,15 @@ def _create_windows_job(proc: subprocess.Popen, start_time: float) -> int | None
 
     with _WINDOWS_JOBS_LOCK:
         _WINDOWS_JOBS[proc.pid] = job_value
+    return job_value
 
+
+def _resume_windows_process(proc: subprocess.Popen) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     threads = psutil.Process(proc.pid).threads()
     if len(threads) != 1:
         raise RuntimeError("Could not identify the suspended device process thread")
@@ -254,17 +616,21 @@ def _create_windows_job(proc: subprocess.Popen, start_time: float) -> int | None
             raise RuntimeError("The device process thread was not suspended exactly once")
     finally:
         kernel32.CloseHandle(thread_handle)
-    return job_value
 
 
-def _close_windows_job(proc: subprocess.Popen, job: int | None, *, keep_active: bool = False) -> None:
-    reap_later = False
+def _close_windows_job(proc: subprocess.Popen | None, job: int | None, *, keep_active: bool = False) -> None:
+    global _WINDOWS_REAPER
+    if proc is None or os.name != "nt":
+        return
     with _WINDOWS_JOBS_LOCK:
         current_job = _WINDOWS_JOBS.get(proc.pid)
         if current_job is None or (job is not None and current_job != job):
             return
         if keep_active and _windows_job_has_active_processes(current_job):
-            reap_later = True
+            _WINDOWS_REAPING[proc.pid] = current_job
+            if _WINDOWS_REAPER is None:
+                _WINDOWS_REAPER = threading.Thread(target=_wait_for_windows_job_exit, daemon=True)
+                _WINDOWS_REAPER.start()
         else:
             del _WINDOWS_JOBS[proc.pid]
             import ctypes
@@ -273,42 +639,60 @@ def _close_windows_job(proc: subprocess.Popen, job: int | None, *, keep_active: 
             kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
             kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
             kernel32.CloseHandle(wintypes.HANDLE(current_job))
-    if reap_later:
-        watcher = threading.Thread(target=_wait_for_windows_job_exit, args=(proc.pid, current_job), daemon=True)
-        watcher.start()
 
 
-def _terminate_windows_jobs() -> None:
+def _terminate_windows_jobs(deadline: float | None = None) -> None:
     if os.name != "nt":
         return
     import ctypes
     from ctypes import wintypes
 
+    if deadline is None:
+        deadline = time.monotonic() + TASKKILL_TIMEOUT
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     while True:
-        with _WINDOWS_JOBS_LOCK:
+        if not _WINDOWS_JOBS_LOCK.acquire(timeout=max(0, deadline - time.monotonic())):
+            logging.getLogger(__name__).warning("Windows job cleanup reached its deadline while waiting for a handle")
+            return
+        try:
             for pid, job in list(_WINDOWS_JOBS.items()):
-                if not _windows_job_has_active_processes(job):
-                    if _WINDOWS_JOBS.get(pid) == job:
-                        del _WINDOWS_JOBS[pid]
+                close_job = time.monotonic() >= deadline
+                try:
+                    if not close_job:
+                        close_job = not _windows_job_has_active_processes(job)
+                    if not close_job and not kernel32.TerminateJobObject(wintypes.HANDLE(job), 1):
+                        logging.getLogger(__name__).warning("Could not terminate Windows job %s", pid)
+                        close_job = True
+                except OSError as exc:
+                    logging.getLogger(__name__).warning("Could not terminate Windows job %s: %s", pid, exc)
+                    close_job = True
+                if close_job:
+                    try:
                         kernel32.CloseHandle(wintypes.HANDLE(job))
-                    continue
-                if not kernel32.TerminateJobObject(wintypes.HANDLE(job), 1) and _windows_job_has_active_processes(job):
-                    raise OSError(ctypes.get_last_error(), "Could not terminate Windows job object")
+                    except OSError as exc:
+                        logging.getLogger(__name__).warning("Could not close Windows job %s: %s", pid, exc)
+                    else:
+                        del _WINDOWS_JOBS[pid]
+                        _WINDOWS_REAPING.pop(pid, None)
             if not _WINDOWS_JOBS:
                 return
-        time.sleep(0.05)
+        finally:
+            _WINDOWS_JOBS_LOCK.release()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logging.getLogger(__name__).warning("Windows job cleanup reached its deadline")
+            return
+        time.sleep(min(0.05, remaining))
 
 
 def terminate_recorded(pid: int, start_time: float) -> None:
     try:
         process = psutil.Process(pid)
-        current = process.create_time()
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return
-    if abs(current - start_time) > 0.01:
+        if not _same_start(pid, start_time):
+            return
+    except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
         return
     if os.name == "nt":
         try:
@@ -356,7 +740,7 @@ def record_process(job_id: str, pid: int, start_time: float) -> None:
     fd, temporary = tempfile.mkstemp(prefix=f"{job_id}.", suffix=".tmp", dir=path.parent)
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as record:
-            json.dump({"pid": pid, "create_time": start_time}, record)
+            json.dump({"pid": pid, "create_time": start_time, **({"boot_id": _boot_id()} if _LINUX else {})}, record)
             record.flush()
             os.fsync(record.fileno())
         if os.name != "nt":
@@ -370,10 +754,13 @@ def reap_recorded_processes() -> None:
     out_dir = Path.home() / ".hermes-hands" / "out"
     if not out_dir.exists():
         return
+    boot_id = _boot_id() if _LINUX else None
     for path in out_dir.glob("*.process.json"):
         try:
             record = json.loads(path.read_text(encoding="utf-8-sig"))
-            terminate_recorded(int(record["pid"]), float(record["create_time"]))
+            # Linux start ticks restart at each boot, so a record from an earlier boot names nothing of ours.
+            if not _LINUX or (boot_id is not None and record.get("boot_id") == boot_id):
+                terminate_recorded(int(record["pid"]), float(record["create_time"]))
         except (OSError, ValueError, KeyError, TypeError, subprocess.TimeoutExpired) as exc:
             import logging
 
@@ -389,7 +776,7 @@ def reap_recorded_processes() -> None:
         path.unlink(missing_ok=True)
 
 
-def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "job", stdin: str | None = None, stdin_b64: str | None = None, on_start=None, on_exit=None, on_capped=None, on_truncated=None) -> Iterator[bytes]:
+def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "job", stdin: str | None = None, stdin_b64: str | None = None, on_start=None, on_exit=None, on_capped=None, on_truncated=None, cancel_event: threading.Event | None = None) -> Iterator[bytes]:
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", job_id):
         raise ValueError("invalid job id")
     if stdin is not None and stdin_b64 is not None:
@@ -403,8 +790,10 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
     stdin_path = None
     stdin_handle = subprocess.DEVNULL
     proc = None
+    created = None
     windows_job = None
     record_written = False
+    launch_pipe = None
     try:
         if stdin_b64 is not None:
             import base64
@@ -432,21 +821,45 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
         if os.name == "nt":
             env.setdefault("PYTHONUTF8", "1")
             env.setdefault("PYTHONIOENCODING", "utf-8")
+        else:
+            with _POSIX_GROUPS_LOCK:
+                _send_to_posix_guardian("")
+            launch_pipe = os.pipe()
+            kwargs["pass_fds"] = (launch_pipe[0],)
+            args = [sys.executable, "-I", "-c", _POSIX_LAUNCH_CODE, str(launch_pipe[0]), *args]
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("The device job was cancelled before launch")
         proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=stdin_handle, env=env, **kwargs)
         if stdin_bytes is not None:
             stdin_handle.close()
-        created = psutil.Process(proc.pid).create_time()
+        created = _start_time(proc.pid)
         windows_job = _create_windows_job(proc, created)
+        if os.name != "nt":
+            _track_posix_group(proc.pid, created)
         if on_start:
             record_process(job_id, proc.pid, created)
             record_written = True
             on_start(proc, created)
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("The device job was cancelled before launch")
+        if windows_job is not None and proc.poll() is None:
+            _resume_windows_process(proc)
+        if launch_pipe is not None:
+            os.write(launch_pipe[1], b"1")
     except BaseException:
+        if launch_pipe is not None:
+            for fd in launch_pipe:
+                os.close(fd)
+            launch_pipe = None
         if stdin_handle != subprocess.DEVNULL:
             stdin_handle.close()
         if proc is not None and proc.poll() is None:
-            _terminate(proc, psutil.Process(proc.pid).create_time())
-            proc.wait()
+            if created is not None:
+                _terminate(proc, created)
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired as exc:
+                logging.getLogger(__name__).warning("Could not finish cancelled job cleanup: %s", exc)
         if script_path is not None:
             script_path.unlink(missing_ok=True)
         if stdin_path is not None:
@@ -455,6 +868,10 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
         if record_written:
             record_path(job_id).unlink(missing_ok=True)
         raise
+    finally:
+        if launch_pipe is not None:
+            for fd in launch_pipe:
+                os.close(fd)
     chunks: queue.Queue[bytes | None] = queue.Queue(maxsize=OUTPUT_QUEUE_SIZE)
     deadline = time.monotonic() + timeout
     total = 0
@@ -472,7 +889,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
 
     def kill_at_deadline() -> None:
         timed_out.set()
-        if proc.poll() is None or proc.pid in _WINDOWS_JOBS:
+        if _leader_running(proc, created) or proc.pid in _WINDOWS_JOBS:
             terminate_once()
 
     timer = threading.Timer(max(0, deadline - time.monotonic()), kill_at_deadline)
@@ -487,7 +904,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
 
         def post_exit_limit_reached() -> bool:
             nonlocal post_exit_started, backpressure
-            if proc.poll() is None:
+            if _leader_running(proc, created):
                 return False
             if post_exit_started is None:
                 post_exit_started = time.monotonic()
@@ -539,7 +956,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
                 ready, _, _ = select.select([proc.stdout], [], [], 0.05)
                 chunk = os.read(proc.stdout.fileno(), CHUNK_SIZE) if ready else None
                 if chunk is None:
-                    if proc.poll() is not None:
+                    if not _leader_running(proc, created):
                         if idle_deadline is None:
                             idle_deadline = time.monotonic() + PIPE_DRAIN_GRACE
                         elif time.monotonic() >= idle_deadline:
@@ -574,6 +991,10 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
                 truncate_post_exit()
                 return
 
+    def record_group_before_reaping() -> None:
+        if os.name != "nt" and proc.returncode is None and not _leader_running(proc, created):
+            _record_posix_group_at_exit(proc.pid, created)
+
     reader = threading.Thread(target=read_output, daemon=True)
     reader.start()
     output_path = Path.home() / ".hermes-hands" / "out" / f"{job_id}.log"
@@ -583,7 +1004,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
         with output_path.open("wb") as log:
             while True:
                 now = time.monotonic()
-                if timed_out.is_set() or (proc.poll() is None and now >= deadline):
+                if timed_out.is_set() or (now >= deadline and _leader_running(proc, created)):
                     terminate_once()
                     if on_exit:
                         on_exit(124)
@@ -615,6 +1036,10 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
                     on_exit(1)
                 yield b"[output truncated after the post-exit idle limit]\n"
                 return
+        if os.name != "nt":
+            while _leader_running(proc, created) and time.monotonic() < deadline:
+                time.sleep(0.01)
+            record_group_before_reaping()
         proc.wait(timeout=max(0.1, deadline - time.monotonic()))
         if timed_out.is_set():
             if on_exit:
@@ -628,6 +1053,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
         reader_stop.set()
         timer.cancel()
         timer.join(timeout=TASKKILL_TIMEOUT + 1)
+        record_group_before_reaping()
         if proc.poll() is None or (not completed and proc.pid in _WINDOWS_JOBS):
             terminate_once()
             if proc.poll() is None:
@@ -644,5 +1070,7 @@ def run(script: str, *, login: bool = False, timeout: int = 120, job_id: str = "
         if stdin_path is not None:
             stdin_path.unlink(missing_ok=True)
         record_path(job_id).unlink(missing_ok=True)
+        if os.name != "nt":
+            _posix_group_is_ours(proc.pid, created)
         if proc is not None:
             _close_windows_job(proc, windows_job, keep_active=completed and not timed_out.is_set() and not termination_started.is_set())

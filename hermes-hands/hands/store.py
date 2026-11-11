@@ -26,6 +26,9 @@ TOMBSTONE_TTL = 7 * 24 * 3600  # seconds a revoked device's key can still be tol
 STOP_GRACE = 3600  # seconds the stop keeps being sent after the first one, in case it was lost
 RESERVED_NAME = "server"  # the gateway host's own target name; no device may take it
 HELP_RETRY_MAX_SECONDS = 60.0
+HELP_MAX_ATTEMPTS = 5
+HELP_TTL_SECONDS = 300
+HELP_RETENTION_SECONDS = 86400
 _HELP_LEASE_SECONDS = 30.0
 
 _SCHEMA = """
@@ -513,6 +516,21 @@ def lease_help_request() -> dict | None:
     now = time.time()
     with _db() as conn:
         conn.execute("BEGIN IMMEDIATE")
+        # Retain current-session rows for dedupe and the three-request quota, even
+        # after delivery expires. Old sessions' rows have a bounded retention.
+        conn.execute(
+            "DELETE FROM help_requests WHERE created_at <= ?"
+            " AND (status != 'leased' OR lease_until <= ?) AND NOT EXISTS"
+            " (SELECT 1 FROM devices d WHERE d.device_id = help_requests.device_id"
+            " AND d.instance = help_requests.instance AND d.witness = 1 AND d.session_state = 'active')",
+            (now - HELP_RETENTION_SECONDS, now),
+        )
+        conn.execute(
+            "UPDATE help_requests SET status = 'expired', lease_token = NULL, lease_until = NULL"
+            " WHERE (status = 'pending' OR (status = 'leased' AND lease_until <= ?))"
+            " AND (created_at <= ? OR attempts >= ?)",
+            (now, now - HELP_TTL_SECONDS, HELP_MAX_ATTEMPTS),
+        )
         row = conn.execute(
             "SELECT * FROM help_requests WHERE"
             " (status = 'pending' AND next_attempt_at <= ?)"

@@ -315,6 +315,8 @@ def test_linux_print_queue_and_pending_updates_are_explicitly_unsupported(monkey
         assert facts[fact_id]["value"] is None
         assert facts[fact_id]["status"] == "unknown"
         assert facts[fact_id]["availability"] == "unsupported"
+    assert facts["pending_updates"]["label"] == "Pending software updates"
+    assert "Windows" not in facts["pending_updates"]["source"]
 
 
 def test_windows_print_queue_uses_in_process_probe_without_shell(monkeypatch):

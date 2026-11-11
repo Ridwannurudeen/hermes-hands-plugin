@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import shlex
 import unicodedata
 from urllib.parse import urlparse
@@ -17,6 +18,9 @@ MAX_OWNER_LABEL_LENGTH = 80
 _REJECT_CHARS = frozenset(('"', "'", "<", ">", " ", "\n", "\r", "\t"))
 # Unexpanded shell text core replaces with a random per-process key (plugins/dashboard_auth/basic/__init__.py:199).
 _UNEXPANDED_SHELL_MARKERS = ("$(", "`", "openssl rand")
+# Phone keyboards turn straight quotes into curly ones.
+_STRAIGHT_DOUBLE_QUOTES = str.maketrans({"\u201c": '"', "\u201d": '"'})
+_STRAIGHT_QUOTES = str.maketrans({"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'"})
 
 
 def _loopback(host: str) -> bool:
@@ -146,6 +150,8 @@ def _safe_owner_label(value: str) -> str | None:
     if not isinstance(value, str) or any(not char.isprintable() for char in value):
         return None
     label = value.strip()
+    if label.isdecimal() or re.match(r"^[A-Za-z][A-Za-z0-9_-]*\s*:", label):
+        return None
     return label if label and len(label) <= MAX_OWNER_LABEL_LENGTH else None
 
 
@@ -154,7 +160,6 @@ def pair_reply(
     name: str,
     *,
     has_seed: bool,
-    owner_id: str | None = None,
     owner_label: str | None = None,
 ) -> str:
     """Mint and format a pairing reply for ``name``, or refuse without minting a code."""
@@ -183,12 +188,9 @@ def pair_reply(
             "pairing URL. Set dashboard.public_url to the https URL of the Hands host, then run "
             "this again."
         )
-    if owner_label is None:
-        configured_owners = _ids(ctx.get_config("owner_ids", default=[]))
-        owner_label = owner_id or (next(iter(configured_owners)) if len(configured_owners) == 1 else "local owner")
     safe_owner_label = _safe_owner_label(owner_label)
     if safe_owner_label is None:
-        return f"Owner label must contain 1 to {MAX_OWNER_LABEL_LENGTH} printable characters."
+        return messages.PAIR_OWNER_LABEL_REQUIRED
     code = store.mint_pairing_code(name, owner_label=safe_owner_label)
     command = f"hermes-hands pair {gateway_url} --name {shlex.quote(name)} --code={shlex.quote(code)}"
     lines = [f"Pair code: {code}", f"Owner label: {safe_owner_label}", f"Run on the device: {command}"]
@@ -307,10 +309,19 @@ def _is_owner(ctx, platform: str, source) -> bool:
         return False
 
 
+def _pair_args(raw_args: str) -> list[str]:
+    """Split /hands pair arguments with curly quotes read as straight ones. Curly single quotes
+    are straightened only when an opening one is present, so an apostrophe inside a name stays
+    as typed."""
+    table = _STRAIGHT_QUOTES if "\u2018" in raw_args else _STRAIGHT_DOUBLE_QUOTES
+    return shlex.split(raw_args.translate(table))
+
+
 def register_commands(ctx, *, has_seed: bool) -> None:
     def handle(raw_args: str, *, session_id="", session_key="", platform="", source=None) -> str:
+        words = raw_args.split(None, 1)
         try:
-            args = shlex.split(raw_args)
+            args = _pair_args(raw_args) if words and words[0].lower() == "pair" else shlex.split(raw_args)
         except ValueError:
             return "Usage: /hands [status|pair|use|devices|revoke|accept-policy|setup]"
         action = args[0].lower() if args else "status"
@@ -357,14 +368,13 @@ def register_commands(ctx, *, has_seed: bool) -> None:
             elif len(args) == 2:
                 owner_label = None
             else:
-                return "Usage: /hands pair <name> [--owner-label <label>]"
+                return "Usage: /hands pair <name> --owner-label <human name>"
             if _in_shared_chat(source):
                 return messages.PAIR_DIRECT_ONLY
             return pair_reply(
                 ctx,
                 args[1],
                 has_seed=has_seed,
-                owner_id=_caller(platform, source),
                 owner_label=owner_label,
             )
         if len(args) != 2:

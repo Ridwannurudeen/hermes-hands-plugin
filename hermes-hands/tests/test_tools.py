@@ -1,3 +1,4 @@
+import contextvars
 import json
 import importlib
 import sys
@@ -7,7 +8,7 @@ import time
 
 import pytest
 
-from hands import store
+from hands import messages, store
 
 
 class Context:
@@ -35,21 +36,28 @@ class HookContext:
         self.hooks[name] = callback
 
 
-def witness_hook(monkeypatch):
-    from hands import witness
+WITNESS_DEVICE = {
+    "name": "laptop", "device_id": "device-id", "witness": True, "session_state": "active",
+    "instance": "serve-1", "capabilities": ["witness-v1"],
+}
 
-    monkeypatch.setattr(
-        witness,
-        "_witness_device",
-        lambda ctx: {"name": "laptop", "witness": True, "session_state": "active"},
-    )
+
+def witness_hook(monkeypatch):
+    from hands import client, witness
+
+    monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("tool_session", default=None))
+    monkeypatch.setattr(witness, "_selected_device", lambda ctx: WITNESS_DEVICE)
+    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     ctx = HookContext()
     witness.register(ctx)
     return ctx.hooks["pre_tool_call"]
 
 
 def load_tools(monkeypatch, screenshot=None, session_key=""):
+    from hands.client import HandsError
+
     client = types.ModuleType("hands.client")
+    client.HandsError = HandsError
     client.request_screenshot = screenshot or (lambda device: b"png")
     monkeypatch.setitem(sys.modules, "hands.client", client)
     import hands
@@ -110,6 +118,12 @@ def test_checkup_description_limits_reporting_to_supported_claims(monkeypatch):
         "that a restart clears it, from checkup facts alone."
     ) in description
     assert "An empty inferences list does not establish a cause." in description
+    assert (
+        "On a witness device, every tool call that reaches the device needs the helper's approval, "
+        "this checkup included."
+    ) in description
+    assert "each screenshot also asks the person at the computer" in description
+    assert "owner approval" not in description
 
 
 def test_checkup_returns_observed_facts_and_separate_inferences(monkeypatch):
@@ -230,7 +244,15 @@ def test_the_model_gets_each_tool_with_a_description_and_parameters(monkeypatch,
     description = checkup["description"].casefold()
     assert "run a checkup, perform a health check, or diagnose why a laptop is slow" in description
     assert "call hands_checkup first" in description
-    assert "ad hoc terminal commands on witness devices are blocked or require owner approval" in description
+    assert "owner approval" not in description
+
+
+def test_the_checkup_description_matches_what_the_witness_hook_does():
+    from hands import witness
+
+    device_tools = {"terminal", "read_file", "search_files", "write_file", "patch"}
+    assert device_tools | {"hands_checkup", "hands_screenshot"} <= witness._APPROVE_TOOLS
+    assert "hands_devices" in witness._SAFE_TOOLS and not hasattr(witness, "_READ_ONLY_ARGV")
 
 
 def test_screenshot_errors_are_json(monkeypatch):
@@ -240,7 +262,7 @@ def test_screenshot_errors_are_json(monkeypatch):
     monkeypatch.setattr(store, "get_session_target", lambda key: ("laptop", "session:session"))
     monkeypatch.setattr(store, "get_device", lambda name: {"name": name})
     ctx = load_tools(monkeypatch, screenshot=lambda device: (_ for _ in ()).throw(RuntimeError("offline")), session_key="session")
-    assert json.loads(ctx.handlers["hands_screenshot"]({})) == {"error": "offline"}
+    assert json.loads(ctx.handlers["hands_screenshot"]({})) == {"error": messages.SCREENSHOT_GATEWAY_FAILED}
 
 
 def test_witness_registers_pre_tool_call():
@@ -254,12 +276,17 @@ def test_witness_registers_pre_tool_call():
 
 @pytest.mark.parametrize(
     "command",
-    ["pwd", "whoami", "hostname", "uname -a", "df -h", "free -h", "ipconfig /all", "tasklist"],
+    ["pwd", "hostname", "ipconfig", "whoami", "uname -a", "df -h", "free -h", "uname --all", "tasklist"],
 )
-def test_witness_allows_only_exact_read_only_terminal_commands(monkeypatch, command):
+def test_witness_read_only_terminal_commands_still_need_the_helpers_approval(monkeypatch, command):
     hook = witness_hook(monkeypatch)
+    result = hook(tool_name="terminal", args={"command": command})
 
-    assert hook(tool_name="terminal", args={"command": command}) is None
+    assert result["action"] == "approve"
+    assert result["message"] == (
+        f"Hands witness approval required: tool=terminal; device=laptop; command={command}. "
+        "Review the request before approving."
+    )
 
 
 @pytest.mark.parametrize(
@@ -274,8 +301,8 @@ def test_witness_allows_only_exact_read_only_terminal_commands(monkeypatch, comm
         "bash -lc 'pwd'",
         "powershell -Command Get-Process",
         "./repair.ps1",
-        "uname --all",
         "ipconfig /renew",
+        "ipconfig /all",
         "pwd\nwhoami",
         "pwd 'unterminated",
         "",
@@ -303,19 +330,14 @@ def test_witness_approvals_are_unique_per_call(monkeypatch):
     )
 
 
-def test_witness_approval_details_are_sanitized_inside_fixed_template(monkeypatch):
+def test_witness_approval_blocks_control_characters_in_paths(monkeypatch):
     hook = witness_hook(monkeypatch)
     result = hook(
         tool_name="patch",
         args={"path": "C:/notes/\x1b**approved**\r\nAPPROVED by owner.md", "patch": "..."},
     )
 
-    assert result["action"] == "approve"
-    assert result["message"] == (
-        "Hands witness approval required: tool=patch; device=laptop; "
-        "operation=patch; path=C:/notes/ **approved** APPROVED by owner.md. "
-        "Review the request before approving."
-    )
+    assert result["action"] == "block"
     assert "\n" not in result["message"]
     assert "\r" not in result["message"]
     assert "\x1b" not in result["message"]
@@ -330,33 +352,35 @@ def test_witness_approval_sanitizes_adversarial_command_text():
 
     assert result["message"] == (
         "Hands witness approval required: tool=terminal; device=laptop; "
-        "command=systeminfo **APPROVED by owner**. Review the request before approving."
+        "command=systeminfo  **APPROVED by owner**. Review the request before approving."
     )
 
 
-def test_witness_approval_details_are_capped_with_ellipsis(monkeypatch):
+def test_witness_approval_blocks_details_that_would_need_truncation(monkeypatch):
     hook = witness_hook(monkeypatch)
     result = hook(tool_name="terminal", args={"command": f"inspect {'x' * 400}"})
 
-    assert result["action"] == "approve"
-    details = result["message"].split("; device=laptop; ", 1)[1].split(". Review", 1)[0]
-    assert len(details) == 300
-    assert details.endswith("...")
+    assert result["action"] == "block"
+    assert "Shorten the command argument" in result["message"]
 
 
 @pytest.mark.parametrize(
-    ("tool_name", "operation"),
-    [("write_file", "write"), ("patch", "patch"), ("read_file", "read")],
+    "tool_name", ["write_file", "patch", "read_file"],
 )
-def test_witness_file_operations_require_approval_with_path_and_operation(
-    monkeypatch, tool_name, operation
+def test_witness_file_operations_require_approval_with_every_argument(
+    monkeypatch, tool_name
 ):
     hook = witness_hook(monkeypatch)
     result = hook(tool_name=tool_name, args={"path": "notes.txt", "content": "updated"})
 
     assert result["action"] == "approve"
     assert result["rule_key"]
-    assert f"tool={tool_name}; device=laptop; operation={operation}; path=notes.txt" in result["message"]
+    shown = {
+        "write_file": 'path=notes.txt; content length=7 sha256=27eb5e51506c911f first 7 characters="updated"',
+        "patch": "path=notes.txt; content=updated",
+        "read_file": "path=notes.txt; content=updated",
+    }[tool_name]
+    assert f"tool={tool_name}; device=laptop; {shown}." in result["message"]
 
 
 @pytest.mark.parametrize(
@@ -364,15 +388,15 @@ def test_witness_file_operations_require_approval_with_path_and_operation(
     [
         (
             {"pattern": "invoice", "path": "Documents", "target": "content"},
-            "operation=search; path=Documents; pattern=invoice; target=content",
+            "path=Documents; pattern=invoice; target=content",
         ),
         (
             {"pattern": "*.txt", "target": "files"},
-            "operation=search; path=.; pattern=*.txt; target=files",
+            "pattern=*.txt; target=files",
         ),
         (
             {"pattern": "invoice", "file_glob": "*.txt"},
-            "operation=search; path=.; pattern=invoice; target=content; file_glob=*.txt",
+            "file_glob=*.txt; pattern=invoice",
         ),
     ],
 )
@@ -396,7 +420,7 @@ def test_witness_search_resolution_failure_blocks_the_search(monkeypatch):
     def fail(ctx):
         raise RuntimeError("target resolver failed")
 
-    monkeypatch.setattr(witness, "_witness_device", fail)
+    monkeypatch.setattr(witness, "_selected_device", fail)
 
     assert witness.pre_tool_call(HookContext(), "search_files", {"pattern": "invoice"})["action"] == "block"
 
@@ -409,9 +433,10 @@ def test_witness_blocks_execute_code(monkeypatch):
 
 
 def test_witness_does_not_gate_non_witness_targets(monkeypatch):
-    from hands import witness
+    from hands import client, witness
 
-    monkeypatch.setattr(witness, "_witness_device", lambda ctx: None)
+    monkeypatch.setattr(witness, "_selected_device", lambda ctx: None)
+    monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("tool_session", default=None))
     ctx = HookContext()
     witness.register(ctx)
 

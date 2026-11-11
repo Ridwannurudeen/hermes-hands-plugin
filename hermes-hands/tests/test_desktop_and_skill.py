@@ -89,6 +89,9 @@ class SkillCtx(RegisterCtx):
     def register_hook(self, hook_name, callback, *, hold_stream=False):
         self.calls.append(("hook", hook_name))
 
+    def register_middleware(self, kind, callback):
+        self.calls.append(("middleware", kind))
+
     def register_skill(self, name, path, description="", frontmatter=None):
         self.skill = (name, path, description)
 
@@ -135,85 +138,148 @@ def test_hands_skill_starts_checkup_requests_with_builtin_tool():
     source = " ".join(SKILL_MD.read_text(encoding="utf-8-sig").split()).casefold()
 
     assert "call `hands_checkup` as your first tool call" in source
-    assert "ad hoc terminal commands on witness devices are blocked or require owner approval" in source
+    assert "do not improvise terminal commands for a checkup" in source
+    assert (
+        "ad hoc terminal commands on witness devices are blocked or need the helper's approval"
+        in source
+    )
     assert "ask any clarifying questions after the checkup" in source
 
 
-def test_f4_playbooks_keep_diagnostics_approval_and_rechecks():
+def test_hands_skill_names_its_people_without_internal_labels():
     source = SKILL_MD.read_text(encoding="utf-8-sig")
-    expected_commands = {
-        "No internet": (
-            "Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,IPv4Connectivity,IPv6Connectivity",
-            "Resolve-DnsName www.microsoft.com | Select-Object Name,Type,IPAddress",
-            "Test-NetConnection -ComputerName 1.1.1.1 -Port 443 -InformationLevel Quiet",
-            "Clear-DnsClientCache -WhatIf",
-            "Clear-DnsClientCache",
-        ),
-        "Printer stuck": (
-            "Get-Service -Name Spooler | Select-Object Name,Status,StartType",
-            "Get-Printer | Select-Object Name,PrinterStatus,WorkOffline",
-            "Get-PrintJob -PrinterName 'Microsoft Print to PDF' | Select-Object PrinterName,ID,DocumentName,JobStatus",
-            "Get-PrintJob -PrinterName 'OneNote (Desktop)' | Select-Object PrinterName,ID,DocumentName,JobStatus",
-            "Resume-PrintJob -PrinterName 'Microsoft Print to PDF' -ID 4294967295 -WhatIf",
-            "Resume-PrintJob -PrinterName '<same printer>' -ID <same job ID>",
-            "Suspend-PrintJob -PrinterName '<same printer>' -ID <same job ID>",
-        ),
-        "Slow PC": (
-            r"Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3",
-            "Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize,LastBootUpTime",
-            "Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name,Id,CPU,WorkingSet64,Responding",
-            r"Set-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name MinAnimate -Value '0' -WhatIf",
-        ),
-        "Disk full": (
-            'Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID,FileSystem,FreeSpace,Size',
-            "Get-ChildItem -LiteralPath $env:TEMP -File -Force | Measure-Object -Property Length -Sum",
-            'compact.exe /C /S:"<same folder>"',
-            'compact.exe /U /S:"<same folder>"',
-        ),
-        "Program frozen": (
-            "Get-Process | Where-Object { -not $_.Responding } | Select-Object Name,Id,Responding,StartTime",
-            "Task Manager → End task",
-        ),
+    normalized = " ".join(source.split())
+
+    assert "the helper is the person chatting with you" in normalized.casefold()
+    assert "the person at the computer" in normalized.casefold()
+    assert re.search(r"\bF\d\b", source) is None
+    assert re.search(r"\bowner\b", source, re.I) is None
+
+
+def test_hands_skill_says_a_blocked_repair_out_loud_and_never_works_around_it():
+    normalized = " ".join(SKILL_MD.read_text(encoding="utf-8-sig").split()).casefold()
+
+    assert "when a repair is blocked by the safety rules, say so plainly" in normalized
+    assert "offer manual steps for the helper to read out" in normalized
+    assert "never try to get around a block" in normalized
+
+
+def test_hands_skill_sends_no_powershell_to_the_person_at_the_computer():
+    source = SKILL_MD.read_text(encoding="utf-8-sig")
+
+    assert "```powershell" not in source.casefold()
+    assert "| Select-Object" not in source
+    assert "| Where-Object" not in source
+    assert (
+        re.search(
+            r"\b(?:Get|Set|Clear|Test|Resolve|Resume|Suspend|Stop|Remove|Measure)-[A-Z][A-Za-z]+",
+            source,
+        )
+        is None
+    )
+
+
+def test_hands_skill_carries_no_facts_from_the_test_laptop():
+    source = SKILL_MD.read_text(encoding="utf-8-sig")
+
+    for fact in (
+        "20.4",
+        "17.3",
+        "15.4",
+        "2.39",
+        "31.21",
+        "24.6",
+        "26300",
+        "Microsoft Print to PDF",
+        "OneNote",
+        "4294967295",
+        "0x80070005",
+        "ridwan",
+        "Notepad",
+    ):
+        assert fact not in source, fact
+
+
+def test_hands_skill_uses_plain_ascii_punctuation():
+    source = SKILL_MD.read_text(encoding="utf-8-sig")
+
+    assert [char for char in source if ord(char) > 127] == []
+
+
+def test_windows_playbooks_keep_diagnostics_approval_and_rechecks():
+    source = SKILL_MD.read_text(encoding="utf-8-sig")
+    titles = ("One site or app fails", "Printer stuck", "Slow PC", "Disk full", "Program frozen")
+    repairs = {
+        "One site or app fails": "ipconfig /flushdns",
+        "Printer stuck": "Automatic resume is unsupported under the current command gate",
+        "Slow PC": "reg.exe add",
+        "Disk full": "compact.exe /C",
+        "Program frozen": "taskkill.exe /PID",
     }
 
-    for title, commands in expected_commands.items():
+    for title in titles:
         match = re.search(
-            rf"^### {re.escape(title)} \(Windows-only\)\n(.*?)(?=^### |\Z)",
+            rf"^### {re.escape(title)} \(Windows only\)\n(.*?)(?=^### |\Z)",
             source,
             re.M | re.S,
         )
         assert match is not None, title
         section = match.group(1)
+        assert repairs[title] in section, title
         for phrase in (
             "Confirm the symptom",
-            "Read-only diagnostics",
+            "Checkup first",
+            "`hands_checkup`",
             "Facts.",
             "Uncertainty.",
-            "One reversible repair",
-            "one F2 approval",
+            "Repair",
+            "Untested",
+            "Words for the helper",
+            "What she sees",
+            "helper's approval",
             "Recheck and outcome",
             "Before",
             "After",
-            "fixed",
-            "not fixed",
-            "Linux read-only equivalent",
-            "hands_checkup",
+            "`fixed`",
+            "`not fixed`",
+            "`unknown`",
+            "Helper terminal call",
+            "```bash",
         ):
             assert phrase.casefold() in section.casefold(), (title, phrase)
-        for command in commands:
-            assert command in section, (title, command)
 
     normalized = " ".join(source.split())
-    assert "local Windows PowerShell session" in normalized
-    assert "blocks pipelines and shell composition" in normalized
+    assert "the device cannot reach the helper at all" in normalized
     assert "keep its `facts` and `inferences` separate" in normalized.casefold()
     assert "wait for it" in normalized
-    assert "a second dangerous-command prompt" in normalized
-    assert "Clearing a print job requires administrator privileges" in normalized
-    assert "Remove-Item -Recurse/-Force" in normalized
-    assert "del /s /q" in normalized
-    assert "taskkill /F" in normalized
-    assert "Stop-Process -Force" in normalized
+    assert "End task is not reversible" in normalized
+    assert "never ask the person at the computer for a process id" in normalized.casefold()
+    assert "never tell the person at the computer to type commands" in normalized.casefold()
+    assert "it does not resume the document" in normalized
+
+
+def test_hands_skill_fenced_commands_pass_the_actual_witness_gate():
+    from hands.witness import _command_decision
+
+    source = SKILL_MD.read_text(encoding="utf-8-sig")
+    commands = re.findall(r"^```([^\n]*)\n(.*?)\n```", source, re.M | re.S)
+    assert len(commands) >= 5
+    for language, block in commands:
+        assert language == "bash"
+        for command in block.splitlines():
+            decision = _command_decision(command)
+            assert decision is None or decision["action"] == "approve", command
+    assert "MSYS_NO_PATHCONV=1 tasklist /FO CSV" not in source
+    assert "MSYS_NO_PATHCONV=1 ipconfig /all" not in source
+
+
+def test_hands_skill_unknown_is_not_a_failed_repair():
+    source = " ".join(SKILL_MD.read_text(encoding="utf-8-sig").split()).casefold()
+
+    assert "if the recheck is unavailable, report `unknown`" in source
+    assert "report `not fixed` only when" in source
+    assert "every device-reaching tool call needs the helper's approval" in source
+    assert "including diagnostics, `hands_checkup` and `hands_screenshot`" in source
 
 
 def _pane_pattern(name: str) -> re.Pattern[str]:
@@ -221,6 +287,20 @@ def _pane_pattern(name: str) -> re.Pattern[str]:
     source = PLUGIN_JS.read_text(encoding="utf-8-sig")
     [pattern] = re.findall(rf"const {name} =\s*/(.+)/m;", source)
     return re.compile(pattern, re.M)
+
+
+def _pane_pair_command(**values: str) -> str:
+    """The /hands arguments the pane's Pair button sends, filled from plugin.js's own template."""
+    source = PLUGIN_JS.read_text(encoding="utf-8-sig")
+    [template] = re.findall(r"runHands\(sessionId, `(pair [^`]*)`\)", source)
+
+    def fill(match: re.Match[str]) -> str:
+        return "'" + values.pop(match.group(1)).strip().replace("'", "'\"'\"'") + "'"
+
+    command = re.sub(r"\$\{shellQuote\((\w+)\.trim\(\)\)\}", fill, template)
+    assert not values and "${" not in command, command
+    assert "disabled: !sessionId || !name.trim() || !label.trim() || busy," in source
+    return command
 
 
 class CommandCtx(RegisterCtx):
@@ -246,7 +326,9 @@ def test_the_pane_reads_the_hands_command_output(hands_db, monkeypatch):
 
     pytest.importorskip("hermes_cli.config")
     monkeypatch.setenv("HERMES_HOME", str(hands_db))
-    reply = ctx.handler("pair 'new pc'", session_key="k", platform="desktop", source=None)
+    reply = ctx.handler(
+        _pane_pair_command(name=" new pc ", label="Sam O'Neil"), session_key="k", platform="desktop", source=None
+    )
     code = _pane_pattern("PAIR_CODE").search(reply).group(1)
     command = _pane_pattern("PAIR_COMMAND").search(reply).group(1)
     assert store.pairing_code_name(code) == "new pc"

@@ -747,7 +747,8 @@ def _pending_updates_fact() -> dict[str, object]:
     if platform.system() == "Windows":
         source = "No bounded in-process Windows Update catalog query is available; known reboot markers are reported separately"
     else:
-        source = "Windows Update checks are distribution-specific and are not queried by this device checkup"
+        label = "Pending software updates"
+        source = "Software update checks depend on this operating system and are not queried by this device checkup"
     return _unsupported_fact(fact_id, label, "updates", source)
 
 

@@ -1,6 +1,6 @@
 import json
 import logging
-import re
+import threading
 import time
 import types
 
@@ -311,6 +311,8 @@ class FakeDeviceLoop:
         self.witness = False
         self.session_state = "normal"
         self.capabilities = []
+        self.stop_event = threading.Event()
+        self._stop_lock = threading.Lock()
         from hermeshands_device.console import ConsoleOwner
 
         self.console_owner = ConsoleOwner(console, on_stop=lambda: None, on_help=lambda text: None)
@@ -355,11 +357,69 @@ def _prepare_witness_cli(
 def test_witness_requires_stdin_and_stdout_ttys(monkeypatch, capsys, input_tty, output_tty):
     console = FakeConsole("Y")
     _prepare_witness_cli(monkeypatch, console, input_tty=input_tty, output_tty=output_tty)
+    monkeypatch.setattr(cli.sys, "platform", "win32")
 
     assert cli.main(["serve", "--witness"]) == 1
 
     assert console.prompts == []
-    assert "stdin and stdout TTYs" in capsys.readouterr().err
+    assert "Open a normal Command Prompt or PowerShell window and run this again." in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("platform", "message"), [
+    ("win32", "Open a normal Command Prompt or PowerShell window and run this again.\n"),
+    ("linux", "Open a normal terminal window and run this again.\n"),
+    ("darwin", "Open a normal terminal window and run this again.\n"),
+])
+def test_witness_tty_refusal_names_the_terminal_of_this_platform(monkeypatch, capsys, platform, message):
+    console = FakeConsole("Y")
+    _prepare_witness_cli(monkeypatch, console, input_tty=False)
+    monkeypatch.setattr(cli.sys, "platform", platform)
+
+    assert cli.main(["serve", "--witness"]) == 1
+
+    assert capsys.readouterr().err == message
+
+
+def test_witness_stopped_right_after_consent_does_not_start_the_session(monkeypatch):
+    from hermeshands_device import loop
+
+    class StoppedRightAway(FakeDeviceLoop):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            consent = self.console_owner.startup_consent
+
+            def stop_after_consent(prompt):
+                answer = consent(prompt)
+                self.stop_event.set()
+                return answer
+
+            self.console_owner.startup_consent = stop_after_consent
+
+    console = FakeConsole("Y")
+    _prepare_witness_cli(monkeypatch, console)
+    monkeypatch.setattr(loop, "DeviceLoop", StoppedRightAway)
+
+    assert cli.main(["serve", "--witness"]) == 0
+
+    assert StoppedRightAway.last.run is False
+    assert StoppedRightAway.last.witness is False
+    assert StoppedRightAway.last.session_state == "normal"
+    assert "Witness mode stopped before the session started.\n" in console.outputs
+
+
+@pytest.mark.parametrize("witness", [True, False])
+def test_interrupted_serve_exits_without_a_traceback(monkeypatch, capsys, witness):
+    console = FakeConsole("Y")
+    _prepare_witness_cli(monkeypatch, console)
+
+    def interrupt(self):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(FakeDeviceLoop, "run_forever", interrupt)
+
+    assert cli.main(["serve", "--witness"] if witness else ["serve"]) == 130
+
+    assert capsys.readouterr().err == ""
 
 
 def test_witness_refuses_pythonw(monkeypatch, capsys):
@@ -397,22 +457,21 @@ def test_witness_y_starts_session_after_initial_consent(monkeypatch, answer):
     assert agent.session_state == "active"
     assert agent.capabilities == ["witness-v1", "checkup-v1", "help-v1", "receipt-v1"]
     text = "".join(console.outputs)
-    assert "device-1" in text
-    assert "device-1's Hermes wants to help" in text
-    assert "hands.example.test" in text
-    assert "30 minutes" in text
-    assert "No mouse or keyboard control" in text
-    assert "Commands and outcomes are recorded" in text
-    assert len(console.prompts) == 1
-    assert re.match(r"^\[\d{4}-\d{2}-\d{2}T[^\]]+Z\] Start witness mode\? \[Y/N\]: $", console.prompts[0])
+    assert "device-1" not in text
+    assert "Your helper wants to help with this computer." in text
+    assert "Details: hands.example.test" in text
+    assert "This ends by itself after 30 minutes." in text
+    assert "Your helper cannot move your mouse or type on your keyboard." in text
+    assert console.prompts[0] == "Start? Type Y or N, then press Enter: "
 
 
-def test_witness_startup_suppresses_httpx_info_logs(monkeypatch, capsys):
+def test_witness_startup_suppresses_httpx_info_logs(monkeypatch, capsys, tmp_path):
     from hermeshands_device import janitor
 
     console = FakeConsole("Y")
     real_start = janitor.start
     _prepare_witness_cli(monkeypatch, console)
+    monkeypatch.setattr(config, "ROOT", tmp_path)
     monkeypatch.setattr(janitor, "start", real_start)
     monkeypatch.setattr(janitor, "cleanup", lambda: 0)
 
@@ -451,11 +510,18 @@ def test_witness_startup_suppresses_httpx_info_logs(monkeypatch, capsys):
 
     monkeypatch.setattr(FakeDeviceLoop, "run_forever", run_with_fake_polls)
 
-    assert cli.main(["serve", "--witness"]) == 0
+    try:
+        assert cli.main(["serve", "--witness"]) == 0
+        logging.getLogger("hermeshands_device.loop").warning("Device poll failed; retrying")
+    finally:
+        for handler in list(root_logger.handlers):
+            handler.close()
 
     console_text = "".join(console.outputs + console.prompts) + capsys.readouterr().err
-    assert "Start witness mode? [Y/N]:" in console_text
+    assert "Start? Type Y or N, then press Enter:" in console_text
     assert "INFO:httpx:" not in console_text
+    assert "Device poll failed" not in console_text
+    assert "Device poll failed; retrying" in (tmp_path / "out" / "device.log").read_text(encoding="utf-8-sig")
     assert httpx_logger.getEffectiveLevel() == logging.WARNING
     assert httpcore_logger.getEffectiveLevel() == logging.WARNING
 
@@ -466,7 +532,44 @@ def test_witness_consent_screen_uses_persisted_owner_label(monkeypatch):
 
     assert cli.main(["serve", "--witness"]) == 0
 
-    assert "Ridwan's Hermes wants to help" in "".join(console.outputs)
+    assert "Ridwan wants to help with this computer." in "".join(console.outputs)
+
+
+@pytest.mark.parametrize("owner_label", ["telegram:123456", "123456"])
+def test_witness_consent_screen_never_shows_platform_ids(monkeypatch, owner_label):
+    console = FakeConsole("N")
+    _prepare_witness_cli(monkeypatch, console, owner_label=owner_label)
+
+    assert cli.main(["serve", "--witness"]) == 0
+
+    text = "".join(console.outputs)
+    assert "123456" not in text
+    assert "Your helper wants to help with this computer." in text
+
+
+@pytest.mark.parametrize(("error", "message"), [
+    (
+        RuntimeError("Another hermes-hands serve process is already running for this device home"),
+        "Hermes Hands is already running on this computer. Close the other window and try again.",
+    ),
+    (
+        PermissionError("unknown_device"),
+        "This computer is no longer paired with your helper. Ask your helper for a new pairing code.",
+    ),
+])
+@pytest.mark.parametrize("witness", [True, False])
+def test_serve_startup_errors_are_plain_text(monkeypatch, capsys, error, message, witness):
+    console = FakeConsole("Y")
+    _prepare_witness_cli(monkeypatch, console)
+
+    def fail(self):
+        raise error
+
+    monkeypatch.setattr(FakeDeviceLoop, "run_forever", fail)
+
+    assert cli.main(["serve", "--witness"] if witness else ["serve"]) == 1
+
+    assert capsys.readouterr().err == message + "\n"
 
 
 @pytest.mark.parametrize(("answer", "expected"), [("N", 0), ("n", 0), ("yes", 0), ("ok", 0), ("", 0), (None, 1)])
@@ -480,8 +583,7 @@ def test_witness_decline_or_eof_does_not_start_agent(monkeypatch, capsys, answer
     assert FakeDeviceLoop.last.run is False
     assert FakeDeviceLoop.last.witness is False
     assert "declined" in "".join(console.outputs).lower()
-    assert len(console.prompts) == 1
-    assert re.match(r"^\[\d{4}-\d{2}-\d{2}T[^\]]+Z\] Start witness mode\? \[Y/N\]: $", console.prompts[0])
+    assert console.prompts == ["Start? Type Y or N, then press Enter: "]
 
 
 @pytest.mark.parametrize("stop_answer", ["S", "s"])
@@ -519,7 +621,7 @@ def test_receipt_files_are_signed_redacted_and_verifiable_from_cli(tmp_path, mon
                 "timestamp": "2026-11-08T10:02:00Z",
                 "label": "Help request",
                 "outcome": "Accepted by relay",
-                "delivery_status": "pending",
+                "delivery_status": "accepted",
                 "request_id": "a" * 32,
             },
             {
@@ -553,26 +655,59 @@ def test_receipt_files_are_signed_redacted_and_verifiable_from_cli(tmp_path, mon
     envelope = json.loads(json_path.read_text(encoding="utf-8-sig"))
     assert set(envelope) == {"payload", "signature"}
     assert "signature" not in envelope["payload"]
-    assert receipt.verify_receipt(json_path) == envelope["payload"]
+    assert receipt.verify_receipt(json_path, public) == envelope["payload"]
     assert envelope["payload"]["events"][0] == {
         "timestamp": "2026-11-08T10:01:00Z",
         "label": "Running a command",
         "outcome": "Completed with exit code 0",
     }
     text_receipt = text_path.read_text(encoding="utf-8-sig")
-    assert "stopped_by_person" in text_receipt
+    assert "You stopped the session" in text_receipt
+    assert "stopped_by_person" not in text_receipt
     assert "Running a command: Completed with exit code 0" in text_receipt
-    assert "Help request: Accepted by relay (delivery: pending)" in text_receipt
+    assert "Help request: sent" in text_receipt
     assert "Available memory" in text_receipt
     assert "private-command" not in text_receipt
     assert "private-output" not in text_receipt
     assert "private-command" not in json_path.read_text(encoding="utf-8-sig")
     assert "private-output" not in json_path.read_text(encoding="utf-8-sig")
 
+    monkeypatch.setattr(config, "device_id", lambda: "device-1")
+    monkeypatch.setattr(cli, "get_or_create", lambda: (private, public))
     assert cli.main(["receipt", "verify", str(json_path)]) == 0
-    assert "signature verified" in capsys.readouterr().out.lower()
+    assert capsys.readouterr().out == (
+        "This receipt was signed by this device's key and has not been changed.\n"
+        f"Key: {b64u(public)}\n"
+    )
 
+    _, other_public = generate_keypair()
+    monkeypatch.setattr(cli, "get_or_create", lambda: (private, other_public))
+    assert cli.main(["receipt", "verify", str(json_path)]) == 1
+    assert capsys.readouterr().err == "This receipt was not signed by this device's key.\n"
+
+    assert cli.main(["receipt", "verify", str(json_path), f"--key={b64u(public)}"]) == 0
+    assert capsys.readouterr().out == (
+        "This receipt was signed by the key you gave and has not been changed.\n"
+        f"Key: {b64u(public)}\n"
+    )
+    assert cli.main(["receipt", "verify", str(json_path), f"--key={b64u(other_public)}"]) == 1
+    assert capsys.readouterr().err == "This receipt was not signed by the key you gave.\n"
+    assert cli.main(["receipt", "verify", str(json_path), "--key", "not-a-key"]) == 1
+    assert capsys.readouterr().err == "Receipt verification failed: the key you gave is not a device public key.\n"
+
+    monkeypatch.setattr(cli, "get_or_create", lambda: (private, public))
     envelope["payload"]["end_reason"] = "fabricated"
     json_path.write_text(json.dumps(envelope), encoding="utf-8")
     assert cli.main(["receipt", "verify", str(json_path)]) == 1
     assert "verification failed" in capsys.readouterr().err.lower()
+
+
+def test_receipt_verify_without_a_device_key_needs_key_option(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(config, "device_id", lambda: "")
+
+    def no_new_identity():
+        raise AssertionError("verify must not create a device key")
+
+    monkeypatch.setattr(cli, "get_or_create", no_new_identity)
+    assert cli.main(["receipt", "verify", str(tmp_path / "receipt.json")]) == 1
+    assert capsys.readouterr().err == "This computer has no device key. Run this again with --key=<device public key>.\n"

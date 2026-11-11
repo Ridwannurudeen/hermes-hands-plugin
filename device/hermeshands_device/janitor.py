@@ -73,13 +73,18 @@ def cleanup(now: float | None = None) -> int:
 
 
 def start(*, witness: bool = False) -> None:
-    level = logging.WARNING if witness else logging.INFO
-    logging.basicConfig(level=level)
     if witness:
-        logging.getLogger().setLevel(logging.WARNING)
+        cleanup()
+        log_path = config.ROOT / "out" / "device.log"
+        log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        logging.basicConfig(level=logging.WARNING, filename=log_path, encoding="utf-8", force=True)
+        if os.name != "nt":
+            log_path.chmod(0o600)
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
-    cleanup()
+    else:
+        logging.basicConfig(level=logging.INFO)
+        cleanup()
 
     def sweep_hourly() -> None:
         while True:

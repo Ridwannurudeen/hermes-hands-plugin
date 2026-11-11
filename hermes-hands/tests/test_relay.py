@@ -3,6 +3,7 @@ import base64
 import json
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,8 @@ PEER = "203.0.113.7"
 
 
 @pytest.fixture
-def hub(hands_db):
+def hub(hands_db, monkeypatch):
+    monkeypatch.setattr(relay, "_help_context", SimpleNamespace(_gateway_injection_allowed=lambda: True))
     return relay.Relay(relay.derive_keys(SEED))
 
 
@@ -591,7 +593,10 @@ def test_stopping_atomically_clears_witness_and_fails_unclaimed_work(hub, monkey
         local(
             hub,
             "local_exec",
-            {"device": "laptop", "script": "echo queued", "timeout": 5},
+            {
+                "device": "laptop", "script": "echo queued", "timeout": 5,
+                "decision": {"device_id": device.device_id, "state": [True, "active", "instance-1"]},
+            },
         )
     )["job_id"]
     heartbeat = {
@@ -613,7 +618,7 @@ def test_stopping_atomically_clears_witness_and_fails_unclaimed_work(hub, monkey
     assert (output["done"], output["returncode"], output["error"]) == (
         True,
         130,
-        "stopped_by_person",
+        "session_ended",
     )
     assert device.device_id not in hub._queues
     refused = local(
@@ -621,7 +626,7 @@ def test_stopping_atomically_clears_witness_and_fails_unclaimed_work(hub, monkey
         "local_exec",
         {"device": "laptop", "script": "echo after stop", "timeout": 5},
     )
-    assert (refused.status, body(refused)["error"]) == (409, "stopped_by_person")
+    assert (refused.status, body(refused)["error"]) == (409, "session_ended")
     # The device can disappear after the stopping request. Its persisted state remains safe.
     monkeypatch.setattr(store, "OFFLINE_AFTER", -1)
     assert store.device_by_id(device.device_id)["session_state"] == "stopping"

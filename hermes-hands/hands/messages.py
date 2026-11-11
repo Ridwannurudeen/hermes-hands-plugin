@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import re
 
-UPGRADE = "pipx install hermes-hands==0.1.0"
+UPGRADE = (
+    "Update the Hermes Hands device agent on that computer to the version that matches this plugin. "
+    "The install command is in the plugin README."
+)
 _DEVICE_ERROR_CODE = re.compile(r"[^A-Za-z0-9_.-]+")
 _DEVICE_ERROR_CODE_LIMIT = 64
 
@@ -34,6 +37,9 @@ POLICY_CHANGED_WIRE = (
 BAD_REQUEST = "hands: malformed request body."
 SCREENSHOT_TOO_LARGE = "hands: the screenshot is larger than 2 MiB; nothing was saved."
 SCREENSHOT_FAILED = "hands: the device did not send a screenshot."
+SCREENSHOT_GATEWAY_FAILED = "hands: the screenshot failed on the gateway. See the gateway log."
+DEVICES_GATEWAY_FAILED = "hands: the device list could not be read on the gateway. See the gateway log."
+CHECKUP_GATEWAY_FAILED = "hands: the checkup failed on the gateway. See the gateway log."
 PAIR_BAD_CODE = "hands: this pairing code is unknown, expired or already used. Ask the owner for a new /hands pair code."
 PAIR_NAME_RESERVED = (
     "hands: server is the name of the gateway host's own target, so no device can use it. "
@@ -46,12 +52,68 @@ WITNESS_APPROVAL = (
     "Review the request before approving."
 )
 WITNESS_COMMAND_BLOCKED = (
-    "Hermes Hands blocks shell composition, scripts, redirects, malformed commands, and unsupported "
-    "flags during an active witness session."
+    "Hermes Hands blocks shell composition, scripts, programs that run other commands, sed scripts that "
+    "write or run, redirects, malformed commands, and unsupported flags during an active witness session. It also refuses the symbols ; & | < > ` $ ( ) { } * ? "
+    "[ ] ~ # ! % anywhere in a command, even inside quotes, so a folder name with one of them needs "
+    "the manual steps instead."
 )
-WITNESS_EXECUTE_CODE_BLOCKED = "Hermes Hands blocks execute_code during an active witness session."
 WITNESS_TARGET_BLOCKED = (
     "Hermes Hands could not verify the active device and owner, so it blocked this tool call."
+)
+WITNESS_TOOL_BLOCKED = "Hermes Hands blocks this tool during an active witness session."
+WITNESS_ARGUMENTS_LONG = (
+    "Hermes Hands cannot show this request in full on the approval card, so it blocked it. "
+    "Shorten the {argument} argument."
+)
+WITNESS_SHORTER_PATH = (
+    "For a file on the device, a ~/ path such as ~/Desktop/notes.txt is shorter than the full path."
+)
+WITNESS_ARGUMENTS_BLOCKED = (
+    "Hermes Hands blocks malformed arguments, control characters and patch directives during a witness session."
+)
+WITNESS_CONTROL_CHARACTERS_BLOCKED = (
+    "Hermes Hands blocks hidden and control characters in arguments during a witness session. "
+    "Line breaks are allowed only in file content."
+)
+WITNESS_PATCH_DIRECTIVE_BLOCKED = (
+    "Hermes Hands blocks patch directives such as *** Begin Patch in any argument during a "
+    "witness session. Use a plain replace with old_string and new_string."
+)
+WITNESS_PATCH_MODE_BLOCKED = (
+    "Hermes Hands allows only replace mode patches during a witness session."
+)
+WITNESS_PATH_REQUIRED = (
+    "Hermes Hands needs a file path for a write or a patch during a witness session."
+)
+WITNESS_SECRET_BLOCKED = (
+    "Hermes Hands blocked this call because an argument looks like a secret, such as a key, "
+    "token or password, and the approval card would hide it. Do not send secrets to the device."
+)
+WITNESS_AUTOSTART_BLOCKED = (
+    "Hermes Hands blocks startup persistence during a witness session: writes to startup and "
+    "autostart folders, systemd user units and login folders, shell profiles and cron, registry Run "
+    "keys, registry imports and scheduled tasks. These would keep running after the 30 minute "
+    "session ends."
+)
+WITNESS_APPROVAL_DISABLED = (
+    "Hermes Hands requires approvals to be on and yolo mode to be off during a witness session."
+)
+WITNESS_HOOKS_BLOCKED = (
+    "Hermes Hands blocks device tools in a witness session while another tool is watching tool "
+    "calls: another plugin's pre_tool_call hook or tool execution middleware, a shell hook or a "
+    "webhook. It could change a call after the helper approved it. Turn it off for this session "
+    "and restart Hermes. For a plugin, run hermes plugins disable <name>. For a shell hook, run "
+    'hermes hooks revoke "<command>" or remove its entry. For a webhook, remove pre_tool_call '
+    "from its events. hermes hooks list and hermes plugins list show them."
+)
+WITNESS_MEDIA_BLOCKED = (
+    "hands: MEDIA lines never fetch files from the device during a witness session."
+)
+WITNESS_RESULT_KEPT = (
+    "hands: large tool results are never saved on the device during a witness session."
+)
+BACKGROUND_JOB_ENDED = (
+    "hands: this background job has ended or was started elsewhere, so nothing ran."
 )
 STORE_DOWN = (
     "hands: the Hermes Hands store (plugin-data/hermes-hands/hands.db) is unreadable, so this "
@@ -76,6 +138,10 @@ USE_DIRECT_ONLY = (
 PAIR_DIRECT_ONLY = (
     "Hands: a pairing code is a secret that anyone who sees it can use to pair their own machine. "
     "Send /hands pair in a direct chat with the bot."
+)
+PAIR_OWNER_LABEL_REQUIRED = (
+    "Hands: provide a human name with --owner-label, such as --owner-label \"Sam\". "
+    "Use 1 to 80 printable characters, not an account id."
 )
 RELAY_STORE_DOWN = (
     "hands: the relay cannot read the Hermes Hands store (plugin-data/hermes-hands/hands.db) "
@@ -173,7 +239,7 @@ def pair_name_mismatch(minted: str) -> str:
 
 
 def protocol_mismatch(protocol: str) -> str:
-    return f"hands: the device speaks {protocol}; this gateway needs a matching device agent: {UPGRADE}"
+    return f"hands: the device speaks {protocol}. {UPGRADE}"
 
 
 def target_note(name: str, device_os: str | None, home: str | None) -> str:
@@ -193,13 +259,80 @@ def output_omitted(omitted: int, job_id: str | None) -> str:
     )
 
 
+_GIT_BASH_MISSING = (
+    "Git Bash is missing or did not start on {device}, so nothing ran. Install Git for Windows there, "
+    "then run hermes-hands doctor on it."
+)
+_JOB_LIMITS_FAILED = (
+    "{device} could not put this command inside its safety limits, so it stopped the command as "
+    "it started. Restart hermes-hands serve there and run hermes-hands doctor."
+)
+# OSError text carries a variable errno prefix (executor.py raises OSError(code, message)).
+_ERRNO_PREFIX = re.compile(r"^\[(?:Errno|WinError) -?\d+\] ")
+# The device's free-text job errors (device screen.py, loop.py and executor.py).
+_DEVICE_ERRORS = {
+    "Screenshot capture requires serve --allow-screen": (
+        "{device} did not take the screenshot: Screenshot capture requires serve --allow-screen. "
+        "Nothing was captured."
+    ),
+    "Screenshot support is not available on this computer. Reinstall hermes-hands.": (
+        "Screenshots are not available on {device}. Nothing was captured. The person at the "
+        "computer should reinstall the Hermes Hands device agent there."
+    ),
+    "Screenshot exceeds 2 MiB after JPEG compression": (
+        "The screenshot on {device} is larger than 2 MiB even as a JPEG, so nothing was sent."
+    ),
+    "Output exceeded the 64 MiB device limit": (
+        "The output on {device} reached the 64 MiB device limit, so the command was stopped "
+        "there and its output is cut short."
+    ),
+    "Output was truncated after the post-exit pipe idle limit": (
+        "The command on {device} finished, but its output stayed open afterwards, so the device "
+        "stopped reading and the output may be cut short."
+    ),
+    "Git Bash was not found or failed its probe": _GIT_BASH_MISSING,
+    "Could not create Windows job object": _JOB_LIMITS_FAILED,
+    "Could not set Windows job object limits": _JOB_LIMITS_FAILED,
+    "Could not assign process to Windows job object": _JOB_LIMITS_FAILED,
+    "Could not identify the suspended device process thread": _JOB_LIMITS_FAILED,
+    "Could not open the suspended device process thread": _JOB_LIMITS_FAILED,
+    "Could not resume the device process thread": _JOB_LIMITS_FAILED,
+    "The device process thread was not suspended exactly once": _JOB_LIMITS_FAILED,
+    "Could not establish job guardian protection": _JOB_LIMITS_FAILED,
+    "The job guardian did not acknowledge protection": _JOB_LIMITS_FAILED,
+    "The job guardian could not identify the protected process": _JOB_LIMITS_FAILED,
+}
+
+
 def device_result_error(error: str, device: str) -> str:
     """Turn a final device error code into a fixed model-facing sentence."""
     if error == "screenshot_declined":
         return (
-            f"The screenshot was not approved on {device}. Nothing was captured. "
+            f"The person at {device} said no to the screenshot. Nothing was captured. "
             "Do not guess a reason or retry."
         )
+    if error == "screenshot_timeout":
+        return (
+            f"The person at {device} did not answer in time. Nothing was captured. "
+            "Do not guess a reason or retry."
+        )
+    if error == "screenshot_pending":
+        return (
+            f"The person at {device} has not answered the screenshot question yet, so no screenshot "
+            "was taken. Ask again in a moment."
+        )
+    if error == "screenshots_disabled":
+        return (
+            f"The person at {device} turned off screenshots for this session. Nothing was captured. "
+            "Do not guess a reason or retry."
+        )
+    if error == "screenshot_unavailable":
+        return (
+            f"{device} has no screen that screenshots can capture. Nothing was captured. "
+            "Do not guess a reason or retry."
+        )
+    if error == "screenshot_failed":
+        return f"{device} could not capture the screen right now. Nothing was captured. Try again in a minute."
     if error == "stopped_by_person":
         return (
             f"The person at {device} stopped the session. Nothing else will run. "
@@ -210,12 +343,21 @@ def device_result_error(error: str, device: str) -> str:
             f"The 30 minute session on {device} ended. Nothing else will run. "
             "Do not guess a reason or retry."
         )
+    if error == "session_ended":
+        return f"The session on {device} ended. Nothing else will run. Do not guess a reason or retry."
     if error == "unknown_job_type":
         return "The device rejected this job type. Nothing ran. Do not guess a reason or retry."
+    fixed = _ERRNO_PREFIX.sub("", error, count=1)
+    if fixed in _DEVICE_ERRORS:
+        return f"{_DEVICE_ERRORS[fixed].format(device=device)} Do not guess a reason or retry."
     if error.startswith("hands:"):
         return error
     code = _DEVICE_ERROR_CODE.sub("_", error).strip("_.-")[:_DEVICE_ERROR_CODE_LIMIT]
     code = code.rstrip("_.-") or "unknown"
+    if code == "device_error":
+        return "The device ended the session because of an error. Nothing more will run."
+    if code == "device_is_stopping":
+        return "The person is ending the session. Nothing more will run."
     return f"The device reported: {code}. Do not guess a reason or retry."
 
 

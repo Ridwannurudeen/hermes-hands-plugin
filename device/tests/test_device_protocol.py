@@ -43,7 +43,8 @@ def test_freshness_nonce_cache_and_canonical_json():
     cache = p.NonceCache(ttl=3, max_entries=3)
     assert cache.check_and_add("n", 10)
     assert not cache.check_and_add("n", 11)
-    assert cache.check_and_add("n", 13)
+    assert not cache.check_and_add("n", 13)
+    assert cache.check_and_add("n", 14)
     assert p.canonical_json({"é": 1, "a": [2]}) == '{"a":[2],"é":1}'.encode()
 
 

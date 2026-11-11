@@ -3,6 +3,7 @@ import base64
 import ctypes
 import shutil
 import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -13,6 +14,100 @@ import pytest
 import psutil
 
 from hermeshands_device import executor
+
+
+@pytest.mark.parametrize("platform", ["nt", "posix"])
+def test_close_windows_job_accepts_missing_process(monkeypatch, platform):
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": platform}))
+    executor._close_windows_job(None, None)
+
+
+def test_process_creation_failure_keeps_original_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(executor, "resolve_bash", lambda: "bash")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(executor.subprocess, "Popen", Mock(side_effect=OSError("original launch error")))
+    with pytest.raises(OSError, match="original launch error"):
+        list(executor.run("echo hi"))
+
+
+def test_windows_cleanup_deadline_closes_stubborn_job(monkeypatch):
+    kernel32 = SimpleNamespace(TerminateJobObject=Mock(return_value=1), CloseHandle=Mock())
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
+    monkeypatch.setattr(executor, "_WINDOWS_JOBS", {123: 456})
+    monkeypatch.setattr(executor, "_windows_job_has_active_processes", lambda job: True)
+    started = time.monotonic()
+    executor._terminate_windows_jobs(started + 0.05)
+    assert time.monotonic() - started < 0.3
+    assert executor._WINDOWS_JOBS == {}
+    kernel32.CloseHandle.assert_called_once()
+
+
+def test_windows_cleanup_logs_oserror_and_closes_handle(monkeypatch, caplog):
+    kernel32 = SimpleNamespace(TerminateJobObject=Mock(side_effect=OSError("denied")), CloseHandle=Mock())
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: kernel32, raising=False)
+    monkeypatch.setattr(executor, "_WINDOWS_JOBS", {123: 456})
+    monkeypatch.setattr(executor, "_windows_job_has_active_processes", lambda job: True)
+    executor._terminate_windows_jobs(time.monotonic() + 0.05)
+    assert "denied" in caplog.text
+    assert executor._WINDOWS_JOBS == {}
+    kernel32.CloseHandle.assert_called_once()
+
+
+def test_retained_windows_jobs_share_one_reaper(monkeypatch):
+    watchers = []
+    monkeypatch.setattr(executor, "_WINDOWS_REAPING", {})
+    monkeypatch.setattr(executor, "_WINDOWS_REAPER", None)
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(executor, "_WINDOWS_JOBS", {pid: pid + 100 for pid in range(10)})
+    monkeypatch.setattr(executor, "_windows_job_has_active_processes", lambda job: True)
+    monkeypatch.setattr(executor.threading, "Thread", lambda **kwargs: watchers.append(kwargs) or SimpleNamespace(start=lambda: None))
+    for pid in range(10):
+        executor._close_windows_job(SimpleNamespace(pid=pid), pid + 100, keep_active=True)
+    assert len(watchers) == 1
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows kill-on-close containment")
+def test_killing_executor_host_closes_job_and_kills_running_child(tmp_path):
+    bash = executor.resolve_bash()
+    if not bash:
+        pytest.skip("Git Bash is unavailable")
+    pid_file = tmp_path / "contained-child.pid"
+    child_code = f"import os,time; from pathlib import Path; Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    host_code = (
+        "import shlex,sys\n"
+        "from pathlib import Path\n"
+        "sys.path.insert(0, sys.argv[1])\n"
+        "from hermeshands_device import executor\n"
+        "executor.Path.home = lambda: Path(sys.argv[2])\n"
+        "executor.resolve_bash = lambda: sys.argv[3]\n"
+        "list(executor.run(shlex.quote(sys.executable.replace('\\\\', '/')) + ' -c ' + shlex.quote(sys.argv[4]), timeout=60))\n"
+    )
+    host = subprocess.Popen(
+        [sys.executable, "-u", "-c", host_code, str(Path(executor.__file__).parents[1]), str(tmp_path), bash, child_code],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=subprocess.CREATE_NO_WINDOW,
+    )
+    child = None
+    try:
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and host.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert host.poll() is None, host.communicate(timeout=1)
+        assert pid_file.exists()
+        child = psutil.Process(int(pid_file.read_text(encoding="utf-8-sig")))
+        host.kill()
+        host.wait(timeout=3)
+        _, alive = psutil.wait_procs([child], timeout=3)
+        assert alive == []
+    finally:
+        if host.poll() is None:
+            host.kill()
+        host.communicate(timeout=3)
+        if child is not None and child.is_running():
+            child.kill()
+            child.wait(timeout=3)
 
 
 def test_windowsapps_which_candidate_rejected(monkeypatch, tmp_path):
@@ -294,6 +389,7 @@ def test_grandchild_killed_on_posix(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process group is covered by timeout test")
 def test_recorded_process_reap_kills_process_group(monkeypatch):
+    monkeypatch.setattr(executor, "_LINUX", False)
     calls = []
     monkeypatch.setattr(executor.psutil, "Process", lambda pid: type("Process", (), {"create_time": lambda self: 1.0})())
     monkeypatch.setattr(executor.os, "killpg", lambda pid, sig: calls.append((pid, sig)))
@@ -378,6 +474,7 @@ def test_stdin_base64_is_staged_byte_exact_and_removed(monkeypatch, tmp_path):
 
 
 def test_terminate_kills_checked_descendants_after_job_termination(monkeypatch):
+    monkeypatch.setattr(executor, "_LINUX", False)
     events = []
 
     class Process:
@@ -427,6 +524,7 @@ def test_terminate_kills_checked_descendants_after_job_termination(monkeypatch):
 
 
 def test_terminate_does_not_kill_reused_root_pid(monkeypatch):
+    monkeypatch.setattr(executor, "_LINUX", False)
     calls = []
 
     class ReusedProcess:
@@ -579,6 +677,7 @@ def test_reaped_process_start_time_mismatch_does_not_kill(monkeypatch):
 
 
 def test_recorded_posix_reap_kills_the_process_group(monkeypatch):
+    monkeypatch.setattr(executor, "_LINUX", False)
     killed = []
     process = type("Process", (), {"create_time": lambda self: 2.0})()
     monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
@@ -617,6 +716,8 @@ def test_create_windows_job_sets_kill_on_close_and_resumes_after_assignment(monk
     process = SimpleNamespace(pid=1234, _handle=444)
 
     job = executor._create_windows_job(process, 5.0)
+    assert events == [("set", 0x00002000), ("assign", 111, 444)]
+    executor._resume_windows_process(process)
 
     assert job == 111
     assert events == [
@@ -629,7 +730,46 @@ def test_create_windows_job_sets_kill_on_close_and_resumes_after_assignment(monk
     assert executor._WINDOWS_JOBS == {1234: 111}
 
 
+@pytest.mark.parametrize("cancelled", [False, True])
+def test_windows_job_runs_on_start_before_the_process_is_resumed(monkeypatch, tmp_path, cancelled):
+    monkeypatch.setattr(executor, "_LINUX", False)
+    events = []
+
+    class Process:
+        pid = 1234
+        stdout = None
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    process = Process()
+    monkeypatch.setattr(executor, "os", SimpleNamespace(**{**vars(os), "name": "nt"}))
+    monkeypatch.setattr(executor, "resolve_bash", lambda: "bash.exe")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(executor.psutil, "Process", lambda pid: SimpleNamespace(create_time=lambda: 1.0))
+    monkeypatch.setattr(executor.subprocess, "Popen", lambda args, **kwargs: process)
+    monkeypatch.setattr(executor, "_create_windows_job", lambda proc, created: events.append("job") or 111)
+    monkeypatch.setattr(executor, "_resume_windows_process", lambda proc: events.append("resume"))
+    monkeypatch.setattr(executor.threading, "Timer", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("past start")))
+    monkeypatch.setattr(executor, "_terminate", lambda *args: None)
+    monkeypatch.setattr(executor, "_close_windows_job", lambda *args, **kwargs: None)
+
+    def on_start(proc, created):
+        events.append("on_start")
+        if cancelled:
+            proc.returncode = 1
+
+    with pytest.raises(RuntimeError, match="past start"):
+        list(executor.run("echo hi", on_start=on_start))
+    assert events == ["job", "on_start"] + ([] if cancelled else ["resume"])
+
+
 def test_windows_executor_starts_process_suspended_until_job_setup(monkeypatch, tmp_path):
+    monkeypatch.setattr(executor, "_LINUX", False)
     flags = []
 
     class Process:
@@ -639,7 +779,7 @@ def test_windows_executor_starts_process_suspended_until_job_setup(monkeypatch, 
         def poll(self):
             return None
 
-        def wait(self):
+        def wait(self, timeout=None):
             return 1
 
     process = Process()
@@ -659,6 +799,7 @@ def test_windows_executor_starts_process_suspended_until_job_setup(monkeypatch, 
 
 
 def test_windows_job_close_waits_for_inflight_termination(monkeypatch):
+    monkeypatch.setattr(executor, "_LINUX", False)
     entered = threading.Event()
     release = threading.Event()
     closed = threading.Event()

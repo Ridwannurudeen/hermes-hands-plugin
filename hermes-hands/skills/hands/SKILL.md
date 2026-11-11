@@ -5,6 +5,11 @@ description: "Work on a paired Hermes Hands device: Git Bash paths on Windows, w
 
 # Hermes Hands
 
+In this skill, the helper is the person chatting with you. The person at the computer is whoever
+sits at the paired device, often someone the helper is supporting from far away. They can be the
+same person. In a witness session the helper approves each tool call that reaches the device, and
+the person at the computer sees each command on her screen before it runs and can stop the session.
+
 When the user points this conversation at a device with `/hands use <device>`, your `terminal`,
 `read_file`, `write_file`, `patch` and `search_files` calls run on that device as its user, not on
 the Hermes server. `/hands use server` points them back at the server. Only the user switches the
@@ -15,8 +20,8 @@ target, from a direct chat with the bot, and a switch applies from the next comm
 
 The first `terminal` result after a switch, or in a new session, starts with a target note:
 
-- `hands: now on laptop (Windows-11-..., Git Bash, home /c/Users/ridwan; use /c/... paths)`
-- `hands: now on laptop (Linux-..., home /home/ridwan)`
+- `hands: now on laptop (Windows-11-..., Git Bash, home /c/Users/<name>; use /c/... paths)`
+- `hands: now on laptop (Linux-..., home /home/<name>)`
 - `hands: now on server (the gateway host)`
 
 Take paths from the note's home. Do not reuse paths from the server (or from another device) after
@@ -25,43 +30,81 @@ online.
 
 Terminal commands on a device start in its home folder. A relative path in `read_file`,
 `write_file`, `patch` or `search_files` resolves against the device's current terminal folder, but
-a working folder configured on the gateway still wins over it, so on a device prefer absolute device
-paths built from the note's home (`/c/Users/ridwan/...` on Windows, `/home/ridwan/...` on Linux). A
-`~/...` path lands in the device home, though the tool result may show the server's home in its
-`resolved_path`.
+a working folder configured on the gateway still wins over it, so outside a witness session prefer
+absolute device paths built from the note's home (`/c/Users/<name>/...` on Windows,
+`/home/<name>/...` on Linux). A `~/...` path lands in the device home, though the tool result may
+show the server's home in its `resolved_path`.
+
+In a witness session, prefer short `~/...` paths for `read_file`, `write_file` and `patch`, such
+as `~/Desktop/notes.txt`. The helper's approval card holds about 300 characters, so a long
+`/c/Users/<name>/...` path can make Hermes Hands refuse the call. A call whose approval text would
+be too long is refused, not shortened. If a refusal names an argument that is too long, shorten
+that argument. The card shows each argument in full, except the content of a write: for that it
+shows the length, a short digest and the first characters of the content. When you write a file,
+tell the helper what the rest of the file contains.
 
 Do not use `sudo` on a device: its default deny list refuses it with exit 126.
 
 ## Checkup first
 
 For any request to run a checkup, perform a health check, or diagnose why a laptop is slow, call
-`hands_checkup` as your first tool call, before using `terminal` or another diagnostic tool. The
-checkup returns the paired device's built-in read-only facts and separates them from inferences.
-Ad hoc terminal commands on witness devices are blocked or require owner approval. Ask any
-clarifying questions after the checkup, and ask the owner to run extra read-only commands locally
-when the checkup does not provide a needed fact.
+`hands_checkup` as your first tool call, before using `terminal` or another diagnostic tool. Do not
+improvise terminal commands for a checkup. The checkup returns the paired device's built-in
+read-only facts and separates them from inferences. In witness sessions, every device-reaching tool
+call needs the helper's approval, including diagnostics, `hands_checkup` and `hands_screenshot`.
+The person at the computer also gives separate consent for each screenshot. Ad hoc terminal commands on witness devices are blocked or need the helper's approval. Ask
+any clarifying questions after the checkup. When the checkup does not provide a needed fact, ask
+the helper a plain question they can answer or pass on, such as whether other websites open.
 
 When the user requests only observed facts and unavailable items, report only those without
 unsolicited causal claims or repair advice. Do not infer that a reboot marker causes memory
 pressure or slowness, or guarantee that a restart clears it, from checkup facts alone. An empty
 `inferences` list does not establish a cause.
 
+## When the safety rules block something
+
+During a witness session Hermes Hands blocks:
+
+- shell composition (pipes, redirects, `;`, `&&`, `$(...)`) and the symbols `;` `&` `|` `<` `>`
+  `$` `(` `)` `{` `}` `*` `?` `[` `]` `~` `#` `!` `%` and the backtick anywhere in a command, even
+  inside quotes;
+- known script interpreters such as `powershell`, `cmd`, `bash` and `python`;
+- startup persistence (startup folders, autostart folders, LaunchAgents, systemd user units,
+  fish and KDE Plasma login folders, registry Run keys, scheduled tasks, crontab, shell profiles),
+  because it would outlast the 30 minute session. A bare name such as `startup` is fine as a search
+  term in `grep`, `rg` and `git grep`, but a command that names a startup path is refused even when
+  it only reads it. To read a systemd unit, use `systemctl cat <unit>`.
+
+The list is not complete. Every other device-reaching tool call, including commands that can start
+other programs, waits for the helper, who sees its arguments first (a write shows only the start of
+its content).
+
+In a witness session Hermes Hands also blocks every device tool while another tool is watching tool
+calls: another plugin's `pre_tool_call` hook or `tool_execution` middleware, a shell hook, or a
+`hooks.outbound` webhook. The security-guidance and disk-cleanup plugins that ship with Hermes do
+this. The remedy is to turn it off for the session and restart Hermes: `hermes plugins disable
+<name>` for a plugin, `hermes hooks revoke "<command>"` for a shell hook, or removing
+`pre_tool_call` from a webhook's events. `hermes hooks list` and `hermes plugins list` show them.
+
+When a
+repair is blocked by the safety rules, say so plainly in one sentence, then offer manual steps for
+the helper to read out to the person at the computer. Never try to get around a block: do not
+reword, encode, split, wrap, alias or script the command, and do not try another shell or tool.
+
 ## Windows devices (Git Bash)
 
 - Commands run in Git Bash: bash, coreutils, `find` and `grep`. Write bash, not PowerShell or cmd.
-- Use Git Bash path forms everywhere, in commands and in file tool arguments: `C:\Users\ridwan\notes.txt`
-  is `/c/Users/ridwan/notes.txt`, `D:\work` is `/d/work`. Forward slashes, lowercase drive letter.
-- Quote paths with spaces: `"/c/Users/ridwan/My Projects/app"`.
-- Prefer absolute paths built from the note's home over `~`.
-- Git Bash turns a `/switch` argument of a native Windows program (`cmd`, `tasklist`, `ipconfig`,
-  `taskkill`, `schtasks`) into a path, so `cmd /c ...` runs nothing and still exits 0. Run such a
-  program with `MSYS_NO_PATHCONV=1` in front and its switches written normally, with one slash:
-  `MSYS_NO_PATHCONV=1 tasklist /FO CSV`, `MSYS_NO_PATHCONV=1 ipconfig /all`. Never double the slash
-  (`//c`, `//F`): that spelling hides the command from Hermes's approval check, which only knows the
-  single slash form. Under `MSYS_NO_PATHCONV=1`, write that program's path arguments in Windows form,
-  quoted, such as `'C:\Users\ridwan\notes.txt'`, because `/c/...` paths stop working there. Leave
-  path conversion on for everything else.
-- Root `search_files` at the narrowest folder you can (`/c/Users/ridwan/projects`), not the home
+- Use Git Bash path forms everywhere, in commands and in file tool arguments: `C:\Users\<name>\notes.txt`
+  is `/c/Users/<name>/notes.txt`, `D:\work` is `/d/work`. Forward slashes, lowercase drive letter.
+- Quote paths with spaces: `"/c/Users/<name>/My Projects/app"`.
+- Outside a witness session, prefer absolute paths built from the note's home over `~`. In a
+  witness session, prefer short `~/...` paths in file tools; a terminal command there cannot
+  contain `~`.
+- Native Windows switches need the exact `MSYS_NO_PATHCONV=1` form shown in a playbook.
+  Use the built-in checkup for network and process diagnostics. Do not improvise native switches,
+  use doubled slashes or add environment assignments to get around the witness command gate.
+  Under `MSYS_NO_PATHCONV=1`, native path arguments use quoted Windows paths, not `/c/...`.
+- Root `search_files` at the narrowest folder you can (`/c/Users/<name>/projects`), not the home
   folder or a drive root: there it walks every file under that root, AppData included, which is slow.
 
 ## Reading hands errors
@@ -122,260 +165,296 @@ conversation targets; it refuses on the `server` target and in cron.
 - On success the result contains a line `MEDIA:/absolute/path.png`. Copy that exact line into your
   reply (that is how the image reaches the user's chat), then call `vision_analyze` on that path to
   describe what is on screen.
+- In a witness session, keep the `vision_analyze` question short, such as "What is on screen?",
+  under 50 characters. The approval card also holds the long screenshot path, so a longer question
+  is refused.
 - `Screenshot capture requires serve --allow-screen` means the user has not consented to screen
   capture on that device. Tell them; do not retry.
 
 ## Windows troubleshooting playbooks
 
-These five playbooks are Windows-only. The live checklist was run as a standard user on Windows 11
-Home 10.0.26300, build 26300, x64. Those observations are a point-in-time baseline, not a claim
-about the device you are helping now. The Linux equivalents below are read-only comparisons; they
-were not run, and they do not provide Windows repair support through WSL.
+These five playbooks are for Windows devices only. The repairs in them were not tried on a real
+fault, so each one is marked untested. Never tell the person at the computer to type commands, and
+never send her PowerShell. Every step she takes is a click or a key press in Windows itself, and you
+give the helper the exact words to read out to her.
 
-### Shared F4 rules
+Rules for every playbook:
 
 1. Confirm the selected Windows device. For a general checkup, health check, or slow-laptop request,
-   call `hands_checkup` first and ask any needed symptom questions afterward. For other symptoms,
-   confirm the owner's symptom before checking anything.
-2. Call `hands_checkup` for observed device facts. Keep its `facts` and `inferences` separate; do
-   not repeat an inference as an observation. A fact's `availability` may be `unsupported` or
-   `error`, which is not evidence that the condition is absent.
-3. If a playbook needs a fact that `hands_checkup` does not provide, ask the owner to run the exact
-   read-only PowerShell command below in a local Windows PowerShell session and share its output.
-   The Hands device terminal is Git Bash, and the witness hook blocks pipelines and shell
-   composition. Do not send these piped commands through the Hands terminal or reword, wrap, or
-   script them to get around that gate.
-4. State the observed UAC/admin facts before asking for a repair. Propose only the single repair
-   listed for the confirmed symptom. Ask for one F2 owner approval, wait for it, and do nothing if
-   it is denied. If the UI or PowerShell step cannot be performed with the available device tools,
-   have the owner perform that exact step after approval; do not work around a policy refusal.
-5. Re-run the same diagnostics after the repair. Report `Before`, `After`, and exactly `fixed` or
-   `not fixed`. Say `fixed` only when the symptom is gone and the recheck supports that result. If
-   the repair was not performed or the recheck is unavailable, report `not fixed` and state that
-   the effect is unknown.
+   call `hands_checkup` first and ask any symptom questions afterward. For other symptoms, confirm
+   the symptom with the helper, then call `hands_checkup` before suggesting anything.
+2. Keep its `facts` and `inferences` separate; do not repeat an inference as an observation. A
+   fact's `availability` may be `unsupported` or `error`, which is not evidence that the condition
+   is absent. Quote only this device's values, never numbers from another machine.
+3. If the checkup does not answer a question, use only the exact read-only diagnostic listed in
+   that playbook, with approval, or ask what she sees. Do not improvise extra terminal commands.
+4. Before any repair, tell the helper what it changes, whether it can be undone, and that it is
+   untested. Offer only the one repair listed for the confirmed symptom. Ask for the helper's
+   approval, wait for it, and do nothing if it is not given. Submit a repair only after that clear
+   yes in chat.
+5. Recheck with `hands_checkup` and the same questions. Report `Before`, `After`, and exactly
+   `fixed`, `not fixed` or `unknown`. Say `fixed` only when the symptom is gone and the recheck
+   supports it. Report `not fixed` only when a completed recheck shows the symptom remains.
+   If the recheck is unavailable, report `unknown`. A relay outage after a repair does not prove
+   failure. If no repair ran, say so and report only the symptom state actually observed.
 
-The core dangerous-command patterns include `Remove-Item -Recurse/-Force`, `del /s /q`,
-`taskkill /F`, and `Stop-Process -Force`. None of the selected repairs needs those shell patterns.
-For a frozen app, use Task Manager's **End task** action so the F2 repair approval does not lead to
-a second dangerous-command prompt.
+Hermes Hands holds each device call for the helper's approval, and shows it on her screen, only in
+a witness session. Outside one, a terminal call runs at once and she sees nothing in Hermes Hands.
+You cannot always tell which case applies, so treat every repair as if it runs the moment you submit
+it. Say that she saw a command only if the helper approved it in Hermes Hands.
 
-### No internet (Windows-only)
+In a witness session each step needs its own approval. The Session and Always buttons on an
+approval card do not carry over to later steps, and Always leaves unused entries in the helper's
+`command_allowlist`, so ask the helper to approve each step and do not suggest those buttons.
 
-**Confirm the symptom.** Ask whether all internet access fails or only a named site/app, and when
-the problem started. Do not assume a DNS problem from “no internet” alone.
+What she sees: in a witness session, a checkup or an approved command shows up as a short line in
+her Hermes Hands window before it runs. Steps the helper reads out show nothing in Hermes Hands; she
+sees only the Windows windows she opens herself.
 
-**Read-only diagnostics.** Run `hands_checkup` and report `wifi_status`, `dns_servers`,
-`dns_resolution`, and the `reachability_*` facts if available. For the Windows connection profile
-and the named DNS lookup, ask the owner to run these exact checklist commands locally:
+### One site or app fails (Windows only)
 
-```powershell
-Get-NetConnectionProfile | Select-Object Name,InterfaceAlias,IPv4Connectivity,IPv6Connectivity
-Resolve-DnsName www.microsoft.com | Select-Object Name,Type,IPAddress
-Test-NetConnection -ComputerName 1.1.1.1 -Port 443 -InformationLevel Quiet
+**Confirm the symptom.** If the whole internet is down, the device cannot reach the helper at
+all, so this playbook is only for one site or app that fails while Hands still works. Ask the helper
+which site or app fails, what it shows, and when it started. Do not assume a DNS problem.
+
+**Checkup first.** Run `hands_checkup` and report `wifi_status`, `dns_servers`, `dns_resolution`
+and the `reachability_*` facts. Then ask the helper to check with her: "Does another website open,
+for example a news site? Does the same site open on your phone?"
+
+**Facts.** Copy the observed connection, DNS and reachability values with their source and time,
+plus her answers.
+
+**Uncertainty.** If other sites open and the checkup's DNS and reachability facts look normal, the
+problem is likely with that site, that app, or her account there, and these checks cannot say
+which. A site that also fails on her phone is probably down for everyone.
+
+**Repair: clear the local DNS cache.** Untested on a real fault. Offer this only when other sites
+open, this site fails on this computer but opens on her phone, and her browser shows a DNS error
+for this site, such as "server IP address could not be found" or DNS_PROBE_FINISHED_NXDOMAIN. The
+checkup cannot confirm this: its DNS fact looks up one fixed name, not this site. Tell the helper
+the repair is a guess. Windows rebuilds the cache through later lookups. The earlier standard-user probe was only a dry
+run, so actual permissions were not verified. If access is denied or UAC appears, stop.
+Ask for the helper's approval first.
+
+**Helper terminal call.** After the helper's clear yes in chat, submit this exact command through
+`terminal`. In a witness session Hermes Hands then holds it for the helper's approval before it
+runs. Do not send it to the person to type.
+
+```bash
+MSYS_NO_PATHCONV=1 ipconfig /flushdns
 ```
 
-**Facts.** Copy observed connectivity, DNS, and reachability values with their source and time.
-The live checklist's profile, DNS lookup, and TCP test all worked without admin; that laptop had
-internet at the time of the check.
+If the evidence does not support this repair, do not run it; the only repair is then the manual
+close and reopen below. Explain its unsaved-work risk before the helper approves those steps.
 
-**Uncertainty.** A failed DNS lookup with working IP reachability is consistent with a resolver
-problem. If DNS and IP reachability both fail, the cause is not established by these checks. The
-checklist's live success does not establish this device's present state.
+**Words for the helper:** "Please save anything you are typing. Close the browser (or the app)
+completely with the X in its top right corner. Wait a few seconds, then open it again and try the
+site once more."
 
-**One reversible repair.** Only if the evidence points to stale or failed DNS resolution, propose
-clearing the local DNS cache:
+**What she sees:** In a witness session, the approved cache command appears in Hermes Hands. For
+the manual fallback, she sees her own browser or app closing and opening.
 
-```powershell
-Clear-DnsClientCache
+**Recheck and outcome.** Ask whether the site or app works now and run `hands_checkup` again.
+Record Before and After. Report `fixed` only if she says it works; report `not fixed` if the recheck shows it still fails, or `unknown` if verification is unavailable.
+
+### Printer stuck (Windows only)
+
+**Confirm the symptom.** Ask the helper which printer and which document she expects to print.
+Resume a document only if the helper confirms that exact document should print.
+
+**Checkup first.** Run `hands_checkup` and report the `print_queue_jobs` count across the visible
+Windows queues. The checkup does not collect printer names, document names or job numbers. If the
+fact is an error or unavailable, say so.
+
+**Facts.** Report the checkup's job count and what she reads from the print queue window below.
+
+**Uncertainty.** A job count does not say which job is stuck or why. Paused jobs, an offline
+printer and a printer that is out of paper all look alike from the count.
+
+**Repair: resume one paused document.** Untested on a real stuck job. A standard Windows account may
+not be allowed to resume a job; if Windows refuses or asks for an administrator, stop and tell the
+helper. This playbook never cancels or clears jobs. Undo: the same menu has **Pause**, which pauses
+the document again if it has not started printing. Ask for the helper's approval first.
+
+**Helper terminal call.** Automatic resume is unsupported under the current command gate.
+Do not send PowerShell, scripts or a legacy printer command. After the helper's approval, this
+terminal call only opens Settings; it does not resume the document. The person must do the
+manual repair below. Do not report the launch as a completed repair.
+
+```bash
+explorer.exe ms-settings:printers
 ```
 
-`Clear-DnsClientCache -WhatIf` worked in the standard-user probe without UAC or access denied, but
-the actual clear was not run, so actual repair permissions were not verified. State that limit
-before requesting one F2 approval. Windows rebuilds the cache as lookups happen again.
+The earlier standard-user resume dry run was denied without a UAC dialog. Actual permissions
+for this queue were not verified. Do not retry with elevation or clear the queue.
 
-**Recheck and outcome.** Repeat `hands_checkup` and the same three local PowerShell checks. Record
-the DNS and TCP values before and after. Report `fixed` only if the earlier DNS failure is gone,
-reachability succeeds, and the owner confirms the original symptom is resolved; otherwise report
-`not fixed` with the values.
+**Words for the helper:** "Click Start, then Settings. Click Bluetooth and devices, then Printers
+and scanners. Click your printer, then Open print queue. Find your document in the list. If it says
+Paused, right-click it and choose Resume. Tell me what it says now."
 
-**Linux read-only equivalent (not run):** `ip route`, `getent ahosts www.microsoft.com`, and
-`curl -I --connect-timeout 5 https://www.microsoft.com`. Clearing the Windows DNS Client cache is
-not a Linux/WSL repair.
+**What she sees:** In a witness session, the approved Settings launch appears in Hermes Hands.
+She then opens the Windows print queue window and resumes the confirmed document herself.
 
-### Printer stuck (Windows-only)
+**Recheck and outcome.** Run `hands_checkup` again and ask what the queue window shows and whether
+the document printed. Record the status Before and After. Report `fixed` only if the document
+printed; report `not fixed` if it remains stuck, or `unknown` if verification is unavailable.
 
-**Confirm the symptom.** Ask which queue and document the owner expects to print. Resume a job only
-if the owner confirms that exact paused job should print.
+### Slow PC (Windows only)
 
-**Read-only diagnostics.** Run `hands_checkup` and report the `print_queue_jobs` count across the
-visible Windows queues. The checkup does not collect queue names, document names, or job IDs. If its
-fact is an error or unavailable, ask the owner to run these exact read-only checks locally:
+**Confirm the symptom.** After the first `hands_checkup`, ask the helper what feels slow and whether
+it is mainly windows and menus opening or closing. The repair below is only for slow-feeling window
+and menu animations, not a general speed repair.
 
-```powershell
-Get-Service -Name Spooler | Select-Object Name,Status,StartType
-Get-Printer | Select-Object Name,PrinterStatus,WorkOffline
-Get-PrintJob -PrinterName 'Microsoft Print to PDF' | Select-Object PrinterName,ID,DocumentName,JobStatus
-Get-PrintJob -PrinterName 'OneNote (Desktop)' | Select-Object PrinterName,ID,DocumentName,JobStatus
+**Checkup first.** Run `hands_checkup` and report `memory_used_percent`, `memory_available_bytes`,
+`uptime_days`, `pending_reboot` and the sampled `top_process_*` facts. The checkup does not measure
+processor use or whether an app is responding.
+
+**Facts.** Report this device's memory values and the top processes by memory, with their source.
+
+**Uncertainty.** One memory reading does not identify a cause. Low available memory can contribute,
+but turning off animations does not add memory or speed up the processor.
+
+**Repair: disable window minimize and maximize animation for this account.** Untested on the real
+setting. It does not change all animations or add memory. The earlier throwaway current-user
+registry probe worked without UAC, but this setting and its activation were not tested.
+Ask for the helper's approval first. In a witness session each diagnostic and repair call also
+needs its own approval in Hermes Hands.
+
+**Helper terminal call.** First query the exact setting, through an approved terminal call:
+
+```bash
+MSYS_NO_PATHCONV=1 reg.exe query 'HKCU\Control Panel\Desktop\WindowMetrics' /v MinAnimate
 ```
 
-**Facts.** Report the checkup's aggregate job count, plus the spooler status, queue status, and exact
-job ID/status from the local checks. The live read-only checks worked as a standard user; the two
-listed queues had no jobs at that time.
+Only if it exists as REG_SZ with value 1, record that exact Before value and propose this single
+repair. If missing, a different type, or already 0, do not create or change it; use the manual
+fallback instead. After the helper's clear yes, submit the following terminal call:
 
-**Uncertainty.** The live checklist found no job to repair. It does not establish access to a
-different queue or job. The standard-user probe
-`Resume-PrintJob -PrinterName 'Microsoft Print to PDF' -ID 4294967295 -WhatIf` returned
-`HRESULT 0x80070005` (Access is denied), and Windows showed no UAC dialog.
-
-**Admin and one reversible repair.** Clearing a print job requires administrator privileges. This
-playbook does not clear jobs or the whole queue. Its only repair is to resume one owner-confirmed
-paused job by its exact queue and ID:
-
-```powershell
-Resume-PrintJob -PrinterName '<same printer>' -ID <same job ID>
+```bash
+MSYS_NO_PATHCONV=1 reg.exe add 'HKCU\Control Panel\Desktop\WindowMetrics' /v MinAnimate /t REG_SZ /d 0 /f
 ```
 
-The live standard-user `-WhatIf` probe was denied, so resuming may also require admin or queue
-permissions. Tell the owner both facts before asking. Request one F2 approval only after the owner
-confirms the job should print and the required permissions are available. If access is denied,
-stop; do not retry or switch to clearing. If it remains queued, it can be re-paused before printing:
+Undo only after fresh approval by restoring the recorded 1 with the same command and `/d 1`.
+Do not force sign-out, restart Explorer or claim immediate activation. Query the value again and
+ask whether window transitions changed.
+The manual fallback changes Windows' broader Animation effects switch instead; explain that
+difference and obtain approval rather than silently adding a second repair.
 
-```powershell
-Suspend-PrintJob -PrinterName '<same printer>' -ID <same job ID>
+**Words for the helper:** "Click Start, then Settings. Click Accessibility, then Visual effects.
+Find Animation effects and switch it off. Tell me when it shows Off."
+
+**What she sees:** In a witness session, each approved registry query or change appears in
+Hermes Hands. For the manual fallback she sees the Windows Settings window.
+
+**Recheck and outcome.** Run `hands_checkup` again and ask whether windows and menus feel quicker.
+Record Before and After. Report `fixed` only if the selected setting is off (the value reads 0,
+or Animation effects shows Off) and she says the slowness she described is gone. If the setting is
+off but she sees no change, report `unknown`: the change may only show after she signs out and
+back in, which this playbook does not ask her to do. Report `not fixed` only if the setting is
+still on after the change, or `unknown` if verification is unavailable.
+
+### Disk full (Windows only)
+
+**Confirm the symptom.** Ask the helper which drive is low and whether Windows shows a low space
+warning. Do not assume the device home folder is on the drive that is low.
+
+**Checkup first.** Run `hands_checkup` and report `disk_free_percent`, `disk_free_bytes` and the
+available `folder_*_bytes` facts. The checkup measures the drive that holds the device home folder
+and a few folder sizes. If the low drive is another one, ask the helper what Windows shows for it.
+
+**Facts.** Report this device's free space and folder sizes with their availability.
+
+**Uncertainty.** Folder totals do not show which files inside are large. Compression may save little
+or no space for photos, videos and zip files, and it uses processor time.
+
+**Repair: compress one folder she rarely uses.** Choose one ordinary folder of her own files that
+she rarely uses, such as an old archive inside Documents. Never compress the Windows folder,
+Program Files, AppData, her whole user folder or a OneDrive synced folder. Untested on a real
+folder; only a small test file was compressed during development. It deletes nothing. It works only on NTFS drives, which most
+Windows drives are. Undo: repeat the steps and untick the same box. Ask for the helper's approval
+first, and name the folder in the request.
+
+**Helper terminal call.** Resolve the folder from this device's observed path and the helper's
+choice. The path below is an example only; replace it with that exact quoted Windows path, and
+submit the complete command only after the helper's clear yes. If the folder path contains any of
+`;` `&` `|` `<` `>` `$` `(` `)` `{` `}` `*` `?` `[` `]` `~` `#` `!` `%` or a backtick, the terminal
+call is blocked, so use the manual steps below for that folder. A folder named Autostart,
+LaunchAgents, LaunchDaemons or profile.d is refused as startup persistence, and so is `user` inside
+a `systemd` folder, `conf.d` or `functions` inside a `fish` folder, and `env` or `shutdown` inside a
+`plasma-workspace` folder, so use the manual steps for those too.
+
+```bash
+MSYS_NO_PATHCONV=1 compact.exe /C /S:"C:\Users\Example\Archive"
 ```
 
-**Recheck and outcome.** Repeat the same spooler, printer, and job checks. Record the job's status
-before and after, and ask whether the intended document printed. Report `fixed` only if the
-confirmed job is no longer stuck and the owner confirms the result; otherwise report `not fixed`.
+The throwaway compression probe worked without UAC; this folder's permissions and savings were
+not tested. Stop on access denied or UAC. Undo only after fresh approval using the same observed
+path with `/U` in place of `/C`. Do not run `compact.exe /CompactOS` or delete anything.
 
-**Linux read-only equivalent (not run):** `lpstat -p -d` and `lpstat -o` when CUPS and a Linux
-queue exist. WSL does not imply access to the Windows Spooler or these queues.
+**Words for the helper:** "Open File Explorer and find the folder we agreed on. Right-click it and
+choose Properties. Click Advanced. Tick Compress contents to save disk space, click OK, then click
+OK again. If Windows asks, choose Apply changes to this folder, subfolders and files, then OK. Tell
+me when it finishes."
 
-### Slow PC (Windows-only)
+**What she sees:** In a witness session, the approved compression command appears in Hermes
+Hands. The manual fallback uses File Explorer and the folder's Properties window.
 
-**Confirm the symptom.** After the initial `hands_checkup`, ask what feels slow and whether it is
-specifically window/menu transitions. The visual-effects repair below is only for slow-feeling
-transitions, not a general CPU or memory repair.
+**Recheck and outcome.** Run `hands_checkup` again and record free space Before and After. Report
+`fixed` only if free space went up and the low space warning is gone. Report `not fixed` if the measured symptom remains, or `unknown` if verification is unavailable.
 
-**Read-only diagnostics.** Run `hands_checkup` and report `memory_used_percent`,
-`memory_available_bytes`, and the sampled `top_process_*` facts. It does not measure CPU utilization
-or per-process responsiveness. For the exact Windows CPU, memory, and process samples, ask the
-owner to run:
+### Program frozen (Windows only)
 
-```powershell
-Get-Counter '\Processor(_Total)\% Processor Time' -SampleInterval 1 -MaxSamples 3
-Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVisibleMemorySize,LastBootUpTime
-Get-Process | Sort-Object CPU -Descending | Select-Object -First 8 Name,Id,CPU,WorkingSet64,Responding
+**Confirm the symptom.** Ask the helper which app is frozen, by the name she sees on screen, and
+whether her work in it is saved. Never ask the person at the computer for a process ID or any other
+number.
+
+**Checkup first.** Run `hands_checkup` for general device facts. It does not report which app is
+not responding, so ask the helper to ask her: "Does the app's title bar say Not responding? Does
+anything else still work, such as the Start menu?"
+
+**Facts.** Record the app name and her answers, plus the checkup's memory facts.
+
+**Uncertainty.** An app can be busy rather than frozen; waiting a minute sometimes clears it. Ending
+it loses any unsaved work in it.
+
+**Repair: End task, which is not reversible.** End task is not reversible: anything unsaved in that
+app is lost and cannot be brought back. Untested on a real frozen app. Offer it only after she has
+waited a minute and the helper has confirmed the app and the risk. Ask for the helper's approval
+for this one app and wait for a clear yes.
+
+**Helper terminal call.** First ask her to try closing the app normally and to save or recover
+her work. If that works, recheck and stop. Otherwise obtain an approved read-only process list:
+
+```bash
+tasklist
 ```
 
-**Facts.** Report the measured CPU samples and memory values. The live checklist measured CPU at
-20.4%, 17.3%, and 15.4%, and about 2.39 GiB available of 31.21 GiB. `Get-Process`'s `CPU` field is
-cumulative since process start, not current utilization.
+Plain `tasklist` shows only program file names and process numbers. It does not show window
+titles or whether an app is responding. Propose ending a process only when exactly one row has the
+program file name of the app the helper confirmed. Never end explorer.exe, which runs the taskbar,
+the Start menu and the desktop. Never end the program that runs the Hermes Hands window (python.exe,
+hermes-hands.exe, cmd.exe, conhost.exe, OpenConsole.exe, WindowsTerminal.exe, bash.exe or
+mintty.exe) or a Windows system process, and never end all processes that share a name. If the app has
+several rows, has no row you can match, or is one of those programs, use the manual fallback.
+After the helper confirms that app and the risk of losing unsaved work, substitute its observed
+number for this example and submit the exact terminal command only after the helper's clear yes:
 
-**Uncertainty.** A short CPU sample and one memory reading do not identify a cause for all
-slowness. Low available memory can contribute, but turning off animations does not increase CPU
-or RAM capacity.
-
-**One reversible repair.** Only for slow-feeling window or menu transitions, propose turning off
-**Settings → Accessibility → Visual effects → Animation effects** for this account. The owner can
-turn the same setting back on to undo it. The standard-user `-WhatIf` probe below worked, and a
-throwaway HKCU test completed without UAC; the real animation setting was not changed during the
-checklist:
-
-```powershell
-Set-ItemProperty -LiteralPath 'HKCU:\Control Panel\Desktop\WindowMetrics' -Name MinAnimate -Value '0' -WhatIf
+```bash
+MSYS_NO_PATHCONV=1 taskkill.exe /PID 1234
 ```
 
-State that the live probe was not the Settings repair, then request one F2 approval and wait. Do
-not use the registry probe as the repair.
+This requests termination without forcing it; it may refuse a frozen app. Do not add force or
+child-process switches. A same-user throwaway force-stop probe showed no UAC, but this different
+command on this app was not tested. Stop on access denied or UAC; do not escalate.
+Reopen the app manually. Ending the old process is not reversible; reopening cannot restore
+unsaved work. The manual End task fallback below needs its own clear approval and the same warning.
 
-**Recheck and outcome.** Repeat `hands_checkup` and the same local performance checks. Record the
-before/after CPU samples, available memory, and animation-effects setting; ask whether transitions
-improved. Report `fixed` only if the setting is off and the reported transition problem is gone;
-otherwise report `not fixed`.
+**Words for the helper:** "Press Ctrl, Shift and Esc together. Task Manager opens. Find the app in
+the list, click it once, then click End task. Then open the app again from the Start menu."
 
-**Linux read-only equivalents (not run):** `free -h`, `top`, and
-`ps -eo pid,comm,%cpu,%mem --sort=-%mem`. Animation settings are desktop-environment-specific and
-are not a shared Windows/Linux repair.
+**What she sees:** In a witness session, the approved process list and termination request
+appear in Hermes Hands. The manual fallback uses Task Manager, then she reopens the app herself.
 
-### Disk full (Windows-only)
-
-**Confirm the symptom.** Ask which drive is low and whether Windows reports a low-space warning.
-Do not assume the device home folder is on C:.
-
-**Read-only diagnostics.** Run `hands_checkup` and report `disk_free_percent`, `disk_free_bytes`,
-and available `folder_*_bytes` facts. The checkup measures the device home volume and bounded
-folder sizes. If the affected drive or TEMP total is not covered, ask the owner to run these exact
-read-only checks locally:
-
-```powershell
-Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" | Select-Object DeviceID,FileSystem,FreeSpace,Size
-Get-ChildItem -LiteralPath $env:TEMP -File -Force | Measure-Object -Property Length -Sum
-```
-
-The TEMP total is immediate files only, not recursive.
-
-**Facts.** Report the drive, filesystem, free bytes, total bytes, and any folder-size result with
-its availability. The live checklist found C: was NTFS with about 24.6% free; it was not full at
-that time.
-
-**Uncertainty.** The TEMP listing does not identify nested folder sizes. Compression may save
-little or no space for already-compressed media/archive files and uses CPU.
-
-**One reversible repair.** Only for an owner-selected, infrequently accessed folder on NTFS,
-propose compressing that folder. It does not delete files. The standard-user probe compressed and
-uncompressed a throwaway 1 MiB text file with no UAC or access denied; the selected real folder's
-permissions and savings were not tested.
-
-```powershell
-compact.exe /C /S:"<same folder>"
-```
-
-The owner can undo it on the same folder with:
-
-```powershell
-compact.exe /U /S:"<same folder>"
-```
-
-State the selected path and CPU/savings caveat, then request one F2 approval and wait. Do not
-delete files as part of this repair.
-
-**Recheck and outcome.** Repeat the same disk and folder checks and record free bytes before and
-after. Report `fixed` only if free space increased and the owner's low-space symptom is resolved;
-otherwise report `not fixed` with the measured values.
-
-**Linux read-only equivalents (not run):** `df -hT /` and
-`du -x -h --max-depth=1 "$HOME"`. Compression is filesystem-specific; WSL does not provide a
-universal equivalent to NTFS `compact`.
-
-### Program frozen (Windows-only)
-
-**Confirm the symptom.** Confirm the exact app and PID and ask whether its work is saved or
-recoverable. Do not end an app with unsaved work.
-
-**Read-only diagnostics.** Run `hands_checkup` for general device facts, but it does not report
-which process is unresponsive. Ask the owner to run this exact check in local Windows PowerShell:
-
-```powershell
-Get-Process | Where-Object { -not $_.Responding } | Select-Object Name,Id,Responding,StartTime
-```
-
-**Facts.** Record the app name, PID, `Responding` value, and start time from the output. The live
-check returned no unresponsive processes.
-
-**Uncertainty.** The live test used a throwaway Notepad process. Its `Stop-Process -Force` probe
-exited without UAC, but that does not prove permission for this app or a process owned by another
-account. Unsaved work may be lost.
-
-**One reversible repair.** Only after the owner confirms the exact app and that its work is saved
-or recoverable, propose **Task Manager → End task** for that app. Do not issue `Stop-Process -Force`
-or `taskkill /F`; the GUI action avoids a second shell-pattern approval prompt. State the
-same-user probe limit, request one F2 approval, and wait. Then relaunch the app.
-
-**Recheck and outcome.** Repeat the unresponsive-process check and verify the relaunched app
-responds. Record the original PID/status before and the remaining unresponsive list and relaunch
-status after. Report `fixed` only if the old hung process is gone, the app relaunches, and the
-owner confirms it responds; otherwise report `not fixed`.
-
-**Linux read-only equivalent (not run):** `ps -p {PID} -o pid,stat,comm`. WSL process tools do not
-manage Windows GUI processes.
+**Recheck and outcome.** Ask whether the app opened again and responds. Run `hands_checkup` again
+if the whole computer felt slow. Record Before and After. Report `fixed` only if the app opens and
+responds; report `not fixed` if the symptom remains, or `unknown` if verification is unavailable.

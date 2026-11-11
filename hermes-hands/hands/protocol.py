@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
 import json
 import re
 import secrets
@@ -125,17 +126,21 @@ class NonceCache:
         self.ttl = ttl
         self.max_entries = max_entries
         self._entries: dict[str, int] = {}
+        self._expiries: list[tuple[int, str]] = []  # a heap holding exactly the entries of _entries
         self._lock = threading.Lock()
 
     def check_and_add(self, nonce: str, now: int) -> bool:
         with self._lock:
-            self._entries = {key: expiry for key, expiry in self._entries.items() if expiry > now}
+            # Kept through its expiry second: a bearer is fresh for 300 s either side, so a nonce first
+            # seen at ts - 300 must still be held at ts + 300 (ttl 600).
+            while self._expiries and self._expiries[0][0] < now:
+                del self._entries[heapq.heappop(self._expiries)[1]]
             if nonce in self._entries:
                 return False
             if len(self._entries) >= self.max_entries:
-                oldest = min(self._entries, key=self._entries.get)
-                del self._entries[oldest]
+                del self._entries[heapq.heappop(self._expiries)[1]]
             self._entries[nonce] = now + self.ttl
+            heapq.heappush(self._expiries, (now + self.ttl, nonce))
             return True
 
 

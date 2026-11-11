@@ -7,6 +7,7 @@ import functools
 import logging
 import os
 import threading
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -232,7 +233,7 @@ def test_request_screenshot_returns_png_bytes(wired):
         assert client.state()["devices"][0]["name"] == "laptop"
 
 
-def test_screenshot_not_approved_does_not_claim_a_person_said_no(monkeypatch):
+def test_screenshot_declined_says_the_person_said_no(monkeypatch):
     monkeypatch.setattr(client, "_post", lambda *args: {"job_id": "job-1"})
     monkeypatch.setattr(
         client,
@@ -251,7 +252,7 @@ def test_screenshot_not_approved_does_not_claim_a_person_said_no(monkeypatch):
         client.request_screenshot("laptop")
 
     assert str(declined.value) == (
-        "The screenshot was not approved on laptop. Nothing was captured. "
+        "The person at laptop said no to the screenshot. Nothing was captured. "
         "Do not guess a reason or retry."
     )
 
@@ -344,7 +345,7 @@ def test_help_poller_logs_an_error_and_keeps_ticking(monkeypatch, caplog):
     monkeypatch.setattr(client, "deliver_help_once", deliver)
     stop = StopAfterTwoTicks()
     with caplog.at_level(logging.WARNING, logger=client.__name__):
-        client._help_poller(object(), stop)
+        client._help_poller(SimpleNamespace(_manager=SimpleNamespace(has_gateway_message_injector=True)), stop)
 
     assert len(attempts) == 2
     assert stop.waits == 3

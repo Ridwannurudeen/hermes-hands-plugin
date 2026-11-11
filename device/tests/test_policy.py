@@ -4,6 +4,45 @@ from hermeshands_device import policy
 from hermeshands_device.protocol import policy_hash
 
 
+@pytest.mark.parametrize("script", (
+    "pkill -f hermeshands_device", "pkill -9 -f hermes-hands", "killall python",
+    "killall -9 python3.12", "taskkill /im python.exe /f", "taskkill //IM pythonw.exe //F",
+    "pkill -f 'python -m hermeshands_device.cli'", "killall -9 hermes-hands",
+))
+def test_policy_blocks_agent_process_name_termination(script):
+    assert policy.refusal(script)
+
+
+@pytest.mark.parametrize("script", (
+    "pkill -f hermes.hands", "pkill -f hands", "pkill hermes", "kill $(pgrep -f hermes-hands)",
+    "pgrep -f hermes-hands | xargs kill", "killall -r hermes", "kill -9 ${PPID}",
+    'MSYS_NO_PATHCONV=1 taskkill /F /FI "IMAGENAME eq python.exe"', 'taskkill //F //IM "pyth*"',
+    'powershell -c "Stop-Process -Name python -Force"', "Get-Process python* | Stop-Process -Force",
+    "MSYS_NO_PATHCONV=1 schtasks /Change /TN HermesHands /Disable", "/usr/bin/pkill -f hermeshands_device",
+    "cd /tmp && pkill python3", "sudo killall python",
+))
+def test_policy_blocks_common_spellings_of_killing_the_agent(script):
+    assert policy.refusal(script)
+
+
+@pytest.mark.parametrize("script", (
+    "grep -rn pkill /usr/lib/python3/x.py", "cat pkill-python.log", "which killall python3",
+    "ls /usr/bin/pkill /usr/bin/python3", "rg -n killall /home/u/src/python", "pkill -f python-worker",
+    'pkill -f "python manage.py runserver"', "taskkill /IM python-launcher.exe",
+    "rg --line-number --no-heading -e 'killall' '/home/u/src/python' | head -n 50",
+))
+def test_policy_allows_commands_that_only_mention_kill_tools_and_python(script):
+    assert policy.refusal(script) is None
+
+
+def test_self_protection_slice_keeps_scheduled_task_rules_but_not_process_name_kills():
+    assert policy.refusal("schtasks //Delete //TN HermesHands //F", policy.DEFAULTS[:4])
+    for path in ("/usr/lib/python3/pkill.txt", "notes about killall python.txt"):
+        assert policy.refusal(path, policy.DEFAULTS[:4]) is None
+    assert policy.refusal("pkill -f hermeshands_device", policy.DEFAULTS[:4]) is None
+    assert policy.refusal("pkill -f hermeshands_device")
+
+
 def test_policy_refusal_names_pattern_and_126(capsys):
     result = policy.check("sudo rm -rf /")
     output = capsys.readouterr().out
