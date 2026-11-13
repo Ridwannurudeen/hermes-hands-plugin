@@ -1,5 +1,7 @@
 """Resolve the execution target for one terminal call."""
 
+import threading
+
 from . import store
 
 SERVER = "server"
@@ -46,14 +48,43 @@ def resolve_target(*, session_key: str, in_cron: bool, default_target: str) -> s
         session_key=session_key, caller=current_caller(), default_target=default_target
     )
 
-_target_changed = None
 
-def bind_target_changed(callback) -> None:
-    """environment.target_changed registers here. Importing it needs Hermes, which /hands does not."""
-    global _target_changed
-    _target_changed = callback
+# Session ids (one per conversation: /new keeps the session key) that ran a command through the
+# hands backend in this process. Core caches what it learned about the machine that answered and
+# keeps its cwd record (file_operations.py:225-227, terminal_tool.py:255-283), so /hands use
+# refuses another target there; a gateway restart drops both, and this with them.
+_RAN: set[str] = set()
 
-def notify_target_changed(session_key: str) -> None:
-    """/hands use: drop what the file tools cached about the previous target."""
-    if _target_changed is not None:
-        _target_changed(session_key)
+
+def mark_ran(session_id: str) -> None:
+    if session_id:
+        _RAN.add(session_id)
+
+
+def has_run(session_id: str) -> bool:
+    return session_id in _RAN
+
+
+_PENDING: dict[str, int] = {}
+_PENDING_LOCK = threading.Lock()
+
+
+def begin_pending(session_id: str) -> None:
+    if session_id:
+        with _PENDING_LOCK:
+            _PENDING[session_id] = _PENDING.get(session_id, 0) + 1
+
+
+def end_pending(session_id: str) -> None:
+    if session_id:
+        with _PENDING_LOCK:
+            count = _PENDING[session_id] - 1
+            if count:
+                _PENDING[session_id] = count
+            else:
+                del _PENDING[session_id]
+
+
+def is_pending(session_id: str) -> bool:
+    with _PENDING_LOCK:
+        return session_id in _PENDING

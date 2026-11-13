@@ -96,8 +96,9 @@ WITNESS_REFUSALS = (
     "WITNESS_PATH_REQUIRED",
     "WITNESS_SECRET_BLOCKED",
     "WITNESS_AUTOSTART_BLOCKED",
-    "WITNESS_APPROVAL_DISABLED",
-    "WITNESS_HOOKS_BLOCKED",
+    "WITNESS_NOT_APPROVED",
+    "WITNESS_CALLS_OVERLAP",
+    "WITNESS_CALL_CHANGED",
 )
 
 
@@ -120,10 +121,6 @@ def test_a_secret_refusal_never_asks_for_shorter_arguments():
     assert "shorter" not in messages.WITNESS_SECRET_BLOCKED
     assert "secret" in messages.WITNESS_SECRET_BLOCKED
 
-
-def test_the_hooks_refusal_names_execution_middleware_too():
-    assert "pre_tool_call hook" in messages.WITNESS_HOOKS_BLOCKED
-    assert "tool execution middleware" in messages.WITNESS_HOOKS_BLOCKED
 
 
 def test_a_pending_screenshot_question_reads_as_not_answered_yet():

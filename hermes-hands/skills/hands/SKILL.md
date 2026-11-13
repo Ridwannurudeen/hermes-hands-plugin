@@ -16,6 +16,14 @@ the Hermes server. `/hands use server` points them back at the server. Only the 
 target, from a direct chat with the bot, and a switch applies from the next command. The target belongs to the chat, so `/new` and
 `/reset` keep it: a fresh conversation in a chat that was on a device still runs there.
 
+Once a conversation has used a terminal or file tool, including native server file operations, it cannot switch target. Ask the user to start a new
+conversation with `/new`, then `/hands use <target>`. Before the first terminal or file-tool call, any target
+switch is allowed. Core keeps per-session file-tool caches and the recorded working folder
+from the previous machine, and no published seam clears them; see ask 7 in
+`docs/HOOK-REQUEST-ISSUE.md`. Witness writes and patches still need full paths.
+
+The console shows every device job, including core's one-time shell snapshot setup. Core also runs login startup code and sources and refreshes its shell snapshot under the call's approval. These inherited shell jobs are not separately approved. The exact-execution guarantee covers the approved command and file operations, within that runtime envelope.
+
 ## Know where you are
 
 The first `terminal` result after a switch, or in a new session, starts with a target note:
@@ -36,12 +44,15 @@ absolute device paths built from the note's home (`/c/Users/<name>/...` on Windo
 show the server's home in its `resolved_path`.
 
 In a witness session, prefer short `~/...` paths for `read_file`, `write_file` and `patch`, such
-as `~/Desktop/notes.txt`. The helper's approval card holds about 300 characters, so a long
+as `~/Desktop/notes.txt`. `write_file` and `patch` there need a full path, `~/...` or absolute: a
+relative path is refused. The helper's approval card holds about 300 characters, so a long
 `/c/Users/<name>/...` path can make Hermes Hands refuse the call. A call whose approval text would
 be too long is refused, not shortened. If a refusal names an argument that is too long, shorten
 that argument. The card shows each argument in full, except the content of a write: for that it
 shows the length, a short digest and the first characters of the content. When you write a file,
-tell the helper what the rest of the file contains.
+tell the helper what the rest of the file contains. A `patch` there must copy `old_string`
+exactly from the file as it is now, long enough to match only once unless the approved call
+has `replace_all=true`; read the file first.
 
 Do not use `sudo` on a device: its default deny list refuses it with exit 126.
 
@@ -73,18 +84,23 @@ During a witness session Hermes Hands blocks:
   fish and KDE Plasma login folders, registry Run keys, scheduled tasks, crontab, shell profiles),
   because it would outlast the 30 minute session. A bare name such as `startup` is fine as a search
   term in `grep`, `rg` and `git grep`, but a command that names a startup path is refused even when
-  it only reads it. To read a systemd unit, use `systemctl cat <unit>`.
+  it only reads it. To read a systemd unit, use `systemctl cat <unit>`;
+- Git program-selecting options and their abbreviations are refused on every subcommand unless consumed as option values or after `--`. Recognized Git nested-command carriers and other tool launchers, command-selecting configuration settings, all `alias.*` settings and unknown subcommands that could be aliases are refused. Explicit read-only `git config` query modes and `ssh.variant` remain allowed. Ordinary `git difftool` and `git mergetool`, including `-t`/`--tool`, are accepted for helper approval; difftool's `-x`/`--extcmd` command options, their abbreviations and command-selecting configuration settings remain refused. Explicit template directories for clone and init, and send-email recipient/header commands and its SMTP server option (every value), are refused. Config includes and protocol allowances are refused when set. Existing repository configuration and hooks can still launch programs.
+- an argument that is not already its type: send `background`, `timeout` and `limit` as JSON
+  booleans and numbers, never as text such as "true" or "50";
+- Witness calls refuse text Hermes would mask, non-placeholder quoted credential values, token prefixes, Bearer values, key blocks, password flags, credential URLs and long or high-entropy values, including beyond a write preview; plain words and keyword arguments in a recognised source file, with or without spaces around `=`, are treated as variable references unless another refusal rule matches; in other files and in terminal commands, a bare word assigned to a secret-looking name is refused. Shell files (`.sh`, `.bash`, `.zsh`) still refuse no-space assignments, as do environment-lookup lookalikes such as `os.environXYZ123`. The source-file rule is based on the file extension, so text that looks like configuration inside a source file is treated as source. Keyword arguments whose value is a bare name, such as `token=token` inside `Client(token=token, api_key=api_key)` or `password=True`, can be masked by Hermes' own approval display and are refused so the card matches; the spaced form `password = True` works, but `Client(token = token, api_key = api_key)` is still masked and refused. Ordinary paths such as `keyboard.txt`, `tokenizer.py` and
+  `/home/x/secret_santa_list.txt` are allowed. Do not send secrets to the device.
+
+Witness device jobs require a human yes. Automatic approval in single query, cron, unattended
+or finite unattended turns cannot authorize them.
 
 The list is not complete. Every other device-reaching tool call, including commands that can start
 other programs, waits for the helper, who sees its arguments first (a write shows only the start of
 its content).
 
-In a witness session Hermes Hands also blocks every device tool while another tool is watching tool
-calls: another plugin's `pre_tool_call` hook or `tool_execution` middleware, a shell hook, or a
-`hooks.outbound` webhook. The security-guidance and disk-cleanup plugins that ship with Hermes do
-this. The remedy is to turn it off for the session and restart Hermes: `hermes plugins disable
-<name>` for a plugin, `hermes hooks revoke "<command>"` for a shell hook, or removing
-`pre_tool_call` from a webhook's events. `hermes hooks list` and `hermes plugins list` show them.
+In a witness session the device also refuses a command that is not the one the helper approved, for
+example when another plugin changed the call after the approval. Ask again; if it keeps happening,
+the helper can turn off other plugins and hooks for the session.
 
 When a
 repair is blocked by the safety rules, say so plainly in one sentence, then offer manual steps for
@@ -113,8 +129,9 @@ Hands reports its own failures with **exit 255 and a line starting `hands:`**. T
 does not say what happened, since a command can exit 255 by itself; the `hands:` line does, and it
 says whether the command may have run.
 
-When the line says **nothing ran**, nothing ran anywhere; there is no fallback to another machine.
-The line names the cause:
+When the line says **nothing ran**, the refused command did not run; there is no fallback to another
+machine. However, earlier steps of the same tool call, such as the write before its lint check, may
+have completed. The line names the cause:
 
 - `... is offline, so nothing ran` (the device agent is not running or the laptop is asleep)
 - `no paired device is named ...` (revoked or never paired)
@@ -128,8 +145,8 @@ The line names the cause:
 - `the relay cannot read the Hermes Hands store ... and refused this request` (the relay refused the
   command before it ran; the cause is in the dashboard log on the gateway, so tell the user)
 
-Tell the user the cause in one sentence and suggest `/hands use server` to keep working on the
-server, or the fix the line names (start `hermes-hands serve` on the device, or `/hands accept-policy
+Tell the user the cause in one sentence and suggest `/new`, then `/hands use server` to keep
+working on the server, or the fix the line names (start `hermes-hands serve` on the device, or `/hands accept-policy
 <device>` if they changed the deny-list themselves). Do not retry in a loop, and do not try to reach
 the device some other way.
 

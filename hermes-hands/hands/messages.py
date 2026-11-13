@@ -47,6 +47,10 @@ PAIR_NAME_RESERVED = (
 )
 PAIR_BAD_SIGNATURE = "hands: the pairing request is not signed by the public key it carries."
 TARGET_NOTE_SERVER = "hands: now on server (the gateway host)"
+DEVICE_RG_UNAVAILABLE = (
+    "hands: this search names an absolute rg executable from another target, so nothing ran. "
+    "Use a terminal command with grep on the selected device instead."
+)
 WITNESS_APPROVAL = (
     "Hands witness approval required: tool={tool}; device={device}; {details}. "
     "Review the request before approving."
@@ -71,9 +75,18 @@ WITNESS_SHORTER_PATH = (
 WITNESS_ARGUMENTS_BLOCKED = (
     "Hermes Hands blocks malformed arguments, control characters and patch directives during a witness session."
 )
+WITNESS_ARGUMENT_TYPES_BLOCKED = (
+    "Hermes Hands blocks arguments that are not already their declared type during a witness session, "
+    "such as \"true\" for background or \"50\" for limit: the approval card would show another value "
+    "than the one that runs. Send booleans and numbers as JSON values."
+)
 WITNESS_CONTROL_CHARACTERS_BLOCKED = (
     "Hermes Hands blocks hidden and control characters in arguments during a witness session. "
     "Line breaks are allowed only in file content."
+)
+WITNESS_MARKDOWN_BLOCKED = (
+    "Hermes Hands cannot show these formatting characters literally on this approval surface, "
+    "so it blocked the call. Use the manual steps instead."
 )
 WITNESS_PATCH_DIRECTIVE_BLOCKED = (
     "Hermes Hands blocks patch directives such as *** Begin Patch in any argument during a "
@@ -85,9 +98,18 @@ WITNESS_PATCH_MODE_BLOCKED = (
 WITNESS_PATH_REQUIRED = (
     "Hermes Hands needs a file path for a write or a patch during a witness session."
 )
+WITNESS_ABSOLUTE_PATH_REQUIRED = (
+    "Hermes Hands needs the full path for a write or a patch during a witness session, such as "
+    "/home/sam/notes.txt, ~/notes.txt or /c/Users/sam/notes.txt on Windows. Hermes can place a "
+    "relative path in more than one folder, so the approval card could not say which file changes."
+)
 WITNESS_SECRET_BLOCKED = (
     "Hermes Hands blocked this call because an argument looks like a secret, such as a key, "
-    "token or password, and the approval card would hide it. Do not send secrets to the device."
+    "token or password. Do not send secrets to the device."
+)
+WITNESS_SECRET_HIDDEN = (
+    WITNESS_SECRET_BLOCKED + " The approval card would hide part of this text, so it could show "
+    "something different from what runs."
 )
 WITNESS_AUTOSTART_BLOCKED = (
     "Hermes Hands blocks startup persistence during a witness session: writes to startup and "
@@ -95,16 +117,30 @@ WITNESS_AUTOSTART_BLOCKED = (
     "keys, registry imports and scheduled tasks. These would keep running after the 30 minute "
     "session ends."
 )
-WITNESS_APPROVAL_DISABLED = (
-    "Hermes Hands requires approvals to be on and yolo mode to be off during a witness session."
+WITNESS_NOT_APPROVED = (
+    "hands: nothing ran on the device because nobody answered the approval prompt for this call. "
+    "A witness session needs a person to approve every device call, so approvals must be on and "
+    "yolo mode and unattended approval off."
 )
-WITNESS_HOOKS_BLOCKED = (
-    "Hermes Hands blocks device tools in a witness session while another tool is watching tool "
-    "calls: another plugin's pre_tool_call hook or tool execution middleware, a shell hook or a "
-    "webhook. It could change a call after the helper approved it. Turn it off for this session "
-    "and restart Hermes. For a plugin, run hermes plugins disable <name>. For a shell hook, run "
-    'hermes hooks revoke "<command>" or remove its entry. For a webhook, remove pre_tool_call '
-    "from its events. hermes hooks list and hermes plugins list show them."
+WITNESS_CALLS_OVERLAP = (
+    "hands: nothing ran on the device because Hermes ran several device calls at once, so Hands "
+    "could not tell which approval belongs to this one. Ask for one device step at a time."
+)
+WITNESS_PATCH_NOT_EXACT = (
+    "hands: nothing was written on the device because a witness patch must replace exactly one "
+    "exact copy of old_string in the file as it is now. Read the file again and retry with "
+    "old_string copied exactly, spaces and line breaks included, and long enough to match only once."
+)
+WITNESS_PATCH_ALL_NOT_EXACT = (
+    "hands: nothing was written on the device because replace_all must replace every exact copy "
+    "of old_string with the approved new_string. Read the file again and copy old_string exactly, "
+    "including spaces and line breaks."
+)
+WITNESS_CALL_CHANGED = (
+    "hands: nothing ran on the device because this command is not the one the helper approved. "
+    "Another plugin or hook may have changed the call after the approval, or Hermes sent a step "
+    "Hands cannot match to it. Ask again; if it keeps happening, turn off other plugins and hooks "
+    "for this session (hermes plugins list, hermes hooks list)."
 )
 WITNESS_MEDIA_BLOCKED = (
     "hands: MEDIA lines never fetch files from the device during a witness session."

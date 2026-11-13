@@ -21,19 +21,25 @@ def test_tool_decision_freezes_mutable_device_snapshot(hands_db, witness):
         session_state="active" if witness else "normal",
     )
     snapshot = store.device_by_id(device.device_id)
-    client.bind_tool_session(snapshot)
     expected = {
         "decision": {
             "device_id": device.device_id,
             "state": [witness, "active" if witness else "normal", "first" if witness else None],
         }
     }
-    snapshot.update(device_id="changed", witness=not witness, session_state="stopped", instance="other")
-    store.record_seen(device.device_id, instance="second", witness=True, session_state="active")
-    assert client._decision_fields() == expected
-    exposed = client._decision_fields()
-    exposed["decision"]["state"][0] = not witness
-    assert client._decision_fields() == expected
+
+    def body(_args):
+        client.bind_tool_session(snapshot, session_id="s1", tool_call_id="c1")
+        client.record_shown("s1", "c1", "terminal", {}, "hands-witness:f4")
+        client.record_approval("s1", "c1", "hands-witness:f4")
+        snapshot.update(device_id="changed", witness=not witness, session_state="stopped", instance="other")
+        store.record_seen(device.device_id, instance="second", witness=True, session_state="active")
+        assert client._decision_fields() == expected
+        exposed = client._decision_fields()
+        exposed["decision"]["state"][0] = not witness
+        assert client._decision_fields() == expected
+
+    client.tool_execution(args={}, next_call=body, session_id="s1", tool_call_id="c1")
 
 
 @pytest.mark.parametrize("kind", ["exec", "screenshot", "checkup"])

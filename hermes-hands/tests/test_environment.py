@@ -306,7 +306,7 @@ def test_switch_to_server_keeps_each_targets_cwd(laptop, tmp_path):
 
 def test_switch_across_new_objects_ignores_the_other_targets_cwd(laptop):
     """A session outlives its backend object (idle reaper, gateway restart): the next object must not
-    reuse the other target's recorded cwd, and notes its target on its first terminal command."""
+    reuse the other target's recorded cwd, and notes its target when the new environment runs a terminal command."""
     hub, device, home = laptop
     with Agent(hub, device, bash_job):
         first = HandsEnvironment(Ctx(), cwd="~", timeout=30)
@@ -324,24 +324,35 @@ def test_switch_across_new_objects_ignores_the_other_targets_cwd(laptop):
         third.cleanup()
 
 
-def test_a_file_tool_after_a_switch_keeps_the_servers_cwd_off_the_device(laptop):
-    """Only terminal commands count as having run on a target: core records the cwd from those alone."""
-    from tools import terminal_tool
-
+def test_after_new_the_old_targets_record_never_becomes_the_device_cwd(laptop):
+    """/new keeps the session key and core's cwd record under it (terminal_tool.py:255-283), so the
+    new conversation's first command on the device gets the server's last cwd: it keeps its own."""
     hub, device, home = laptop
     with Agent(hub, device, bash_job):
         store.set_session_target("s1", "server")
         env = HandsEnvironment(Ctx(), cwd="~", timeout=30)
-        run_terminal(env, "true")
-        terminal_tool.record_session_cwd("s1", "/opt/srvapp")  # where the server session cd'd
-        store.set_session_target("s1", "laptop")  # /hands use laptop
-        env.execute("cat notes.txt 2>/dev/null; true", cwd=env.cwd)  # read_file runs first
-        # It saw the switch and moved core's record to the laptop (terminal_tool.py:266-276).
-        assert store.get_last_run("s1") == "laptop"
-        first = run_terminal(env, "pwd")
+        assert run_terminal(env, "mkdir -p srvapp && cd srvapp")["returncode"] == 0
+        env.cleanup()
+        store.set_session_target("s1", "laptop")  # /new, then /hands use laptop
+        fresh = HandsEnvironment(Ctx(), cwd="~", timeout=30)
+        fresh.execute("cat notes.txt 2>/dev/null; true", cwd=fresh.cwd)  # read_file runs first
+        first = run_terminal(fresh, "pwd")
         assert first["returncode"] == 0 and first["cwd"] == device_path(str(home)), first
-        assert store.get_last_run("s1") == "laptop"
-        assert run_terminal(env, "cd ~ && pwd")["returncode"] == 0
+        assert run_terminal(fresh, "cd ~ && pwd")["returncode"] == 0
+
+
+def test_a_command_marks_its_conversation_as_having_run(laptop, monkeypatch):
+    """What /hands use reads to refuse another target (targets.has_run)."""
+    from hands import targets
+
+    hub, device, home = laptop
+    monkeypatch.setattr(targets, "_RAN", set())
+    monkeypatch.setenv("HERMES_SESSION_ID", "conversation-1")
+    env = HandsEnvironment(Ctx(), cwd="~", timeout=30)
+    assert env.cwd == device_path(str(home)) and not targets.has_run("conversation-1")
+    with Agent(hub, device, bash_job):
+        assert run_terminal(env, "true")["returncode"] == 0
+    assert targets.has_run("conversation-1") and not targets.has_run("conversation-2")
 
 
 def test_a_workdir_runs_where_it_says_after_a_switch(laptop):
@@ -399,13 +410,10 @@ def last_line(result):
 def test_a_first_command_that_prints_no_cwd_keeps_the_other_targets_cwd_away(laptop, monkeypatch):
     """Core records the cwd only from a command that printed where it ended: offline, refused or
     exited early, the first command on the new target leaves the old target's record in place."""
-    from tools import terminal_tool
-
     hub, device, home = laptop
     store.set_session_target("s1", "server")
     env = HandsEnvironment(Ctx(), cwd="~", timeout=30)
-    run_terminal(env, "true")
-    terminal_tool.record_session_cwd("s1", "/opt/srvapp")
+    run_terminal(env, "mkdir -p srvapp && cd srvapp")
     store.set_session_target("s1", "laptop")
     monkeypatch.setattr(store, "OFFLINE_AFTER", -1)
     assert run_terminal(env, "pwd")["returncode"] == relay.UNREACHABLE
@@ -418,7 +426,7 @@ def test_a_first_command_that_prints_no_cwd_keeps_the_other_targets_cwd_away(lap
         run_terminal(env, "mkdir -p proj && cd proj")
         store.set_session_target("s1", "server")
         assert run_terminal(env, "exit 3")["returncode"] == 3
-        assert last_line(run_terminal(env, "pwd")).rstrip("/").endswith("srv")
+        assert last_line(run_terminal(env, "pwd")).rstrip("/").endswith("srvapp")
 
 
 def test_a_workspace_override_never_becomes_the_device_cwd(laptop):
@@ -689,16 +697,20 @@ def test_gateway_home_maps_only_a_file_tools_path_words(wired, monkeypatch):
     assert shlex.split(quoted) == ["cat", "/c/Users/O'Brien/notes.txt", "2>/dev/null"]
 
 
-def test_gateway_home_never_rewrites_a_terminal_or_background_command(laptop, monkeypatch):
+def test_gateway_home_preserves_only_terminal_and_complete_registry_commands(laptop, monkeypatch):
     hub, device, home = laptop
     monkeypatch.setattr(environment, "_gateway_home", lambda: "/home/gw")
     with Agent(hub, device, bash_job) as agent:
         env = HandsEnvironment(Ctx(), cwd="~", timeout=30)
         shown = env.execute("echo /home/gw/build '/home/gw/x'", bounded_capture=True)
         assert shown["output"].splitlines()[-1] == "/home/gw/build /home/gw/x"
-        # what core's launcher and poller send: they name a job file (process_registry.py:1282-1288)
-        env._subs["laptop"].execute("echo '/home/gw/bg' # hermes_bg_t1.log")
-    assert any("/home/gw/bg" in job.get("script", "") for job in agent.jobs)
+        sub = env._subs["laptop"]
+        ordinary = sub.execute("echo '/home/gw/bg' # hermes_bg_t1.log")
+        assert ordinary["output"].strip() == f"{device_path(str(home))}/bg"
+        probe = 'kill -0 "$(cat /home/gw/hermes_bg_t1.pid 2>/dev/null)" 2>/dev/null; echo $?'
+        sub.execute(probe)
+    assert any(probe in job.get("script", "") for job in agent.jobs)
+    assert not any("echo '/home/gw/bg'" in job.get("script", "") for job in agent.jobs)
 
 
 def test_a_gateway_home_path_from_the_file_tools_lands_in_the_device_home(laptop, monkeypatch):
@@ -930,35 +942,6 @@ def test_file_tools_absolute_and_relative_paths_land_on_the_device(file_tools_on
     assert (home / "My Projects" / "notes v1.txt").read_bytes() == b"patched\n"
 
 
-def test_file_tool_caches_follow_the_target(file_tools_on_laptop, monkeypatch):
-    """Core resolves rg once per ShellFileOperations (file_operations_search.py:523-551); after a
-    switch core's public clear_file_ops_cache drops that object (file_tools.py:377-399), so the next
-    file tool on the device never runs the path the server resolved. The call that sees the switch
-    still holds the old object: environment.target_changed, from /hands use, runs before it."""
-    from tools import file_operations_search
-
-    file_tools, home = file_tools_on_laptop
-    monkeypatch.setattr(file_operations_search, "_bundled_rg", lambda: "/opt/hermes/pm/ripgrep/rg")
-    store.set_session_target("s1", "server")
-    ops = file_tools._get_file_ops("t1")
-    ops.search(pattern="anything", path=".", target="content")
-    assert ops._rg_resolution_cache.get("rg") == "/opt/hermes/pm/ripgrep/rg"
-    store.set_session_target("s1", "laptop")
-    ops.search(pattern="anything", path=".", target="content")  # sees the switch, drops the object
-    fresh = file_tools._get_file_ops("t1")
-    assert fresh is not ops and not fresh._rg_resolution_cache
-    seen = []
-    real = fresh.env.execute
-
-    def spy(command, cwd="", **kwargs):
-        seen.append(command)
-        return real(command, cwd, **kwargs)
-
-    monkeypatch.setattr(fresh.env, "execute", spy)
-    fresh.search(pattern="anything", path=".", target="content")
-    assert seen and not any("/opt/hermes/pm/ripgrep/rg" in command for command in seen), seen
-
-
 @pytest.mark.skipif(
     os.name == "nt",
     reason="core expands ~ with the host's os.path (file_tools_paths.py:46-49), so on a Windows "
@@ -999,7 +982,7 @@ def test_the_prompt_probe_touches_no_target_and_no_store(
     try:
         with Agent(hub, device, bash_job) as agent:
             assert prompt_builder._probe_remote_backend("hands") is None
-        assert agent.jobs == [] and store.get_last_run("s1") is None
+        assert agent.jobs == []
     finally:
         prompt_builder._clear_backend_probe_cache()
 
@@ -1178,8 +1161,9 @@ def test_a_device_that_cannot_answer_keeps_its_job_tracked_and_unkilled(laptop):
         end_jobs(sessions, device)
 
 
-def test_a_workdir_equal_to_another_targets_cwd_is_honoured(laptop, tmp_path):
-    """Core passes explicit workdir= as given (terminal_tool.py:1039-1040), even after a switch."""
+def test_a_workdir_equal_to_another_targets_cwd_reads_as_its_record(laptop, tmp_path):
+    """Core tells the environment nothing that sets a workdir= apart from its record (terminal_tool.py:
+    1373-1377): one equal to the other target's last cwd reads as that target's record."""
     from tools import terminal_tool
 
     hub, device, home = laptop
@@ -1195,9 +1179,8 @@ def test_a_workdir_equal_to_another_targets_cwd_is_honoured(laptop, tmp_path):
                 env, f"cd {shlex.quote(device_path(str(shared)))}"
             )["cwd"]
             store.set_session_target("s1", "laptop")
-            environment.target_changed("s1")
             ran = run_terminal(env, "pwd", workdir=server_cwd)
-            assert ran["cwd"].endswith("/shared"), ran
+            assert ran["cwd"] == device_path(str(home)), ran
             assert run_terminal(env, "pwd")["cwd"] == device_path(str(home))
         finally:
             terminal_tool._active_environments.pop("s1", None)
@@ -1229,17 +1212,17 @@ def test_a_first_workdir_without_a_session_key_never_moves_the_start(laptop, mon
     assert not last_line(after).rstrip("/").endswith("other"), after
 
 
-def test_a_server_workspace_override_owns_the_record_for_a_later_object(laptop):
+def test_a_server_workspace_override_stays_off_the_device_for_a_later_object(laptop):
     """The cwd setter, which core's register_task_env_overrides calls (terminal_tool.py:350-362),
-    stores that the record is now the server's, so an object made after an idle reap knows it."""
+    makes the workspace the server's cwd, so a device keeps its own after an idle reap too."""
     from tools import terminal_tool
 
     hub, device, home = laptop
-    workspace = Path(os.environ["MESSAGING_CWD"])
+    workspace = Path(os.environ["MESSAGING_CWD"]) / "workspace"
+    workspace.mkdir()
     with Agent(hub, device, bash_job):
         env = HandsEnvironment(Ctx(), cwd="~", timeout=30)
         run_terminal(env, "true")
-        assert store.get_last_run("s1") == "laptop"
         store.set_session_target("s1", "server")
         terminal_tool._active_environments["s1"] = env
         try:
@@ -1247,9 +1230,7 @@ def test_a_server_workspace_override_owns_the_record_for_a_later_object(laptop):
         finally:
             terminal_tool._active_environments.pop("s1", None)
             terminal_tool.clear_task_env_overrides("s1")
-        assert store.get_last_run("s1") == "server"
-        run_terminal(env, "true")
-        terminal_tool.record_session_cwd("s1", "/opt/srvapp")  # a Linux gateway's server record
+        assert Path(run_terminal(env, "pwd")["cwd"]) == workspace
         env.cleanup()
         store.set_session_target("s1", "laptop")
         fresh = HandsEnvironment(Ctx(), cwd="~", timeout=30)
@@ -1312,22 +1293,6 @@ def test_relative_paths_after_an_idle_reap_still_follow_the_terminal(file_tools_
     assert "1|c" in json.loads(file_tools.read_file_tool("c.txt", task_id="t1"))["content"]
 
 
-def test_target_changed_drops_the_old_targets_not_found_answers(file_tools_on_laptop, monkeypatch):
-    """Core answers a read from its 60 s not-found cache before it asks the backend (file_tools.py:
-    663-666); /hands use calls target_changed so the new target is asked."""
-    file_tools, home = file_tools_on_laptop
-    monkeypatch.setenv("HERMES_SESSION_ID", "t1")
-    store.set_session_target("s1", "server")
-    path = f"{device_path(str(home))}/report.txt"
-    miss = json.loads(file_tools.read_file_tool(path, task_id="t1"))
-    assert "not found" in (miss.get("error") or "").lower(), miss
-    (home / "report.txt").write_text("laptop data\n", encoding="utf-8")
-    store.set_session_target("s1", "laptop")
-    environment.target_changed("s1")
-    hit = json.loads(file_tools.read_file_tool(path, task_id="t1"))
-    assert "laptop data" in hit.get("content", ""), hit
-
-
 def test_after_cd_to_the_root_relative_paths_anchor_on_the_devices_root(file_tools_on_laptop):
     """Core refuses "/" as a sandbox home and would fall back to the gateway's own cwd
     (terminal_tool_config.py:188-192, file_tools_paths.py:276-278)."""
@@ -1337,3 +1302,227 @@ def test_after_cd_to_the_root_relative_paths_anchor_on_the_devices_root(file_too
     file_tools, home = file_tools_on_laptop
     assert json.loads(terminal_tool("cd /", task_id="t1"))["exit_code"] == 0
     assert str(_resolve_path_for_task("notes.txt", "t1")) == "/notes.txt"
+
+
+@pytest.fixture
+def switching_core(wired, hands_backend, monkeypatch, tmp_path_factory, fresh_call_stores):
+    """Real core caches on two devices, with target changes going through /hands use."""
+    import contextvars
+    import itertools
+    import types
+    from contextlib import ExitStack
+
+    from hermes_cli import plugins
+    from hermes_cli.plugins_manifest import PluginManifest
+    from tools import approval_context, file_tools, terminal_tool
+    from tools.terminal_tool_lifecycle import cleanup_vm
+
+    import model_tools
+    from hands import client, commands, targets
+    from test_commands import Context, DirectSource
+
+    tmp_path = tmp_path_factory.mktemp("cache")
+    stack = ExitStack()
+    ids = itertools.count(1)
+    session_ids = set()
+    monkeypatch.setattr(targets, "_RAN", set())
+    monkeypatch.setenv("TERMINAL_ENV", "hands")
+    for name in (
+        "TERMINAL_CWD", "HERMES_INTERACTIVE", "HERMES_EXEC_ASK",
+        "HERMES_GATEWAY_SESSION", "HERMES_YOLO_MODE",
+        "HERMES_SESSION_PLATFORM", "HERMES_SESSION_USER_ID",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(commands, "terminal_backend", lambda: "hands")
+    manager = plugins.PluginManager()
+    backend = plugins.PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
+    backend.register_middleware("tool_execution", client.tool_execution)
+    monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: {"mode": "manual"})
+
+    def make(shape="cli"):
+        root_a, root_b = tmp_path / "A", tmp_path / "B"
+        home_a, home_b = root_a / "home", root_b / "home"
+        server = tmp_path / "server"
+        server.mkdir()
+        monkeypatch.setenv("MESSAGING_CWD", str(server))
+        for home, label in ((home_a, "A"), (home_b, "B")):
+            (home / "rel").mkdir(parents=True)
+            (home / "proj" / "rel").mkdir(parents=True)
+            (home / "rel" / "x.txt").write_text(f"{label}-MATCH\n", encoding="utf-8")
+            (home / "proj" / "rel" / "x.txt").write_text(f"{label}-MATCH\n", encoding="utf-8")
+        devices = {
+            name: Device(name=name, home=str(home), device_os="Windows-11" if os.name == "nt" else "Linux")
+            for name, home in (("A", home_a), ("B", home_b))
+        }
+
+        def run(job):
+            return bash_job({**job, "script": "export PATH=/usr/bin:/bin;\n" + job["script"]})
+
+        agents = {name: stack.enter_context(Agent(wired[0], device, run)) for name, device in devices.items()}
+        state = {"sid": "cache-1", "key": "agent:main:dm:cache" if shape == "gw" else "cache-1"}
+        surface = "telegram" if shape == "gw" else "cli"
+        source = DirectSource() if shape == "gw" else None
+        owner = targets.caller_id(surface, "42" if source else "")
+        ctx = Context(["telegram:42"])
+        commands.register_commands(ctx, has_seed=True)
+
+        def set_ids():
+            session_ids.update((state["sid"], state["key"]))
+            monkeypatch.setenv("HERMES_SESSION_KEY", state["key"])
+            monkeypatch.setenv("HERMES_SESSION_ID", state["sid"])
+            monkeypatch.setenv("HERMES_SESSION_PLATFORM", surface)
+            monkeypatch.setenv("HERMES_SESSION_USER_ID", "42" if source else "")
+
+        set_ids()
+        store.set_session_target(state["key"], "A", owner=owner)
+
+        def call(name, args):
+            def invoke():
+                approval_context.set_hermes_interactive_context(True)
+                approval_context.set_current_session_key(state["key"])
+                terminal_tool.set_approval_callback(lambda *a, **k: "once")
+                try:
+                    return model_tools.handle_function_call(
+                        name, args, task_id=state["sid"], session_id=state["sid"],
+                        tool_call_id=f"cache-call-{next(ids)}",
+                    )
+                finally:
+                    terminal_tool.set_approval_callback(None)
+            return contextvars.copy_context().run(invoke)
+
+        def use(target):
+            return ctx.handler(
+                f"use {target}", session_id=state["sid"], session_key=state["key"],
+                platform=surface, source=source,
+            )
+
+        def new():
+            cleanup_vm(state["sid"])
+            state["sid"] = "cache-2"
+            if shape == "cli":
+                state["key"] = state["sid"]
+            set_ids()
+
+        return types.SimpleNamespace(
+            call=call, use=use, new=new, state=state, agents=agents,
+            env=lambda: terminal_tool._active_environments[terminal_tool._resolve_container_task_id(state["sid"])],
+            home_b=home_b, root_a=root_a, tmp=tmp_path, files=file_tools,
+        )
+
+    yield make
+    stack.close()
+    for key, env in list(terminal_tool._active_environments.items()):
+        if isinstance(env, HandsEnvironment):
+            terminal_tool._active_environments.pop(key)
+            env.cleanup()
+    file_tools.clear_file_ops_cache()
+    for sid in session_ids:
+        terminal_tool.clear_session_cwd(sid)
+
+
+@pytest.mark.parametrize("shape", ["cli", "gw"])
+def test_read_counter_survives_a_refused_switch_but_not_new(switching_core, shape):
+    core = switching_core(shape)
+    core.call("terminal", {"command": "cd proj"})
+    for _ in range(2):
+        first = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+        assert "A-MATCH" in first["content"] and not first.get("dedup"), first
+    assert "/new" in core.use("B")
+    read = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+    assert "A-MATCH" in read["content"] and "B-MATCH" not in read["content"], read
+    assert "content has not changed" in read["_warning"], read
+    blocked = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+    assert "BLOCKED:" in blocked["error"] and blocked["already_read"] == 4, blocked
+    assert core.agents["B"].jobs == []
+    core.new()
+    assert "Target set to B" in core.use("B")
+    core.root_a.rename(core.tmp / "A.away")
+    retried = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+    assert "B-MATCH" in retried["content"] and not retried.get("dedup"), retried
+    assert "_warning" not in retried and "A-MATCH" not in retried["content"], retried
+
+
+@pytest.mark.parametrize("shape", ["cli", "gw"])
+@pytest.mark.parametrize("timing", ["mid", "new"])
+def test_not_found_cache_survives_a_refused_switch_but_not_new(switching_core, shape, timing):
+    core = switching_core(shape)
+    core.call("terminal", {"command": "cd proj"})
+    (core.home_b / "rel" / "only_b.txt").write_text("B-ONLY\n", encoding="utf-8")
+    first = json.loads(core.call("read_file", {"path": "rel/only_b.txt"}))
+    assert first["not_found"], first
+    if timing == "mid":
+        assert "/new" in core.use("B")
+        assert json.loads(core.call("read_file", {"path": "rel/only_b.txt"})) == first
+        assert core.agents["B"].jobs == []
+    core.new()
+    assert "Target set to B" in core.use("B")
+    core.files._get_file_ops(core.state["sid"])
+    core.root_a.rename(core.tmp / "A.away")
+    before = len(core.agents["B"].jobs)
+    read = json.loads(core.call("read_file", {"path": "rel/only_b.txt"}))
+    assert "B-ONLY" in read["content"] and len(core.agents["B"].jobs) > before, read
+    core.call("terminal", {"command": "pwd"})
+    retried = json.loads(core.call("read_file", {"path": "rel/only_b.txt"}))
+    assert "B-ONLY" in retried["content"] and not retried.get("not_found"), retried
+
+
+@pytest.mark.parametrize("shape", ["cli", "gw"])
+def test_switch_after_new_has_no_read_counter_or_device_dedup(switching_core, shape):
+    core = switching_core(shape)
+    core.call("terminal", {"command": "cd proj"})
+    for _ in range(3):
+        read = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+        assert "A-MATCH" in read["content"] and not read.get("dedup"), read
+    core.new()
+    assert "Target set to B" in core.use("B")
+    core.files._get_file_ops(core.state["sid"])
+    core.root_a.rename(core.tmp / "A.away")
+    read = json.loads(core.call("read_file", {"path": "rel/x.txt"}))
+    assert "B-MATCH" in read["content"] and "A-MATCH" not in read["content"], read
+    assert "_warning" not in read and not read.get("dedup"), read
+
+
+def test_gateway_bundled_rg_is_refused_on_device_after_new(switching_core, monkeypatch):
+    from tools import file_operations_search
+
+    core = switching_core("gw")
+    bundled = core.tmp / "gateway bundled" / "rg"
+    bundled.parent.mkdir()
+    bundled.write_text("#!/bin/sh\necho GATEWAY-RG-STUB-RAN >&2\nexit 1\n", encoding="utf-8")
+    os.chmod(bundled, 0o755)
+    monkeypatch.setattr(file_operations_search, "_bundled_rg", lambda: device_path(str(bundled)))
+    assert "Target set to server" in core.use("server")
+    core.call("terminal", {"command": "pwd"})
+    ops = core.files._get_file_ops(core.state["sid"])
+    assert ops._resolve_command("rg") == device_path(str(bundled))
+    assert ops._rg_resolution_cache == {"rg": device_path(str(bundled))}
+    core.new()
+    assert "Target set to B" in core.use("B")
+    core.call("terminal", {"command": "pwd"})
+    result = core.call("search_files", {"pattern": "MATCH", "path": "rel"})
+    assert messages.DEVICE_RG_UNAVAILABLE in result, result
+    assert "GATEWAY-RG-STUB-RAN" not in result, result
+    assert not any(device_path(str(bundled)) in job.get("script", "") for job in core.agents["B"].jobs)
+
+
+@pytest.mark.parametrize("prefix", ["", "cd . && "])
+@pytest.mark.parametrize("executable", ["/gateway cache/rg", "C:/Hermes cache/rg.exe", r"C:\Hermes cache\rg.exe"])
+def test_absolute_rg_gate_covers_prefix_and_windows_paths(switching_core, monkeypatch, prefix, executable):
+    from hands import client
+
+    core = switching_core()
+    assert "Target set to B" in core.use("B")
+    core.call("terminal", {"command": "pwd"})
+    env = core.env()
+    command = f"set -o pipefail; {prefix}{shlex.quote(executable)} --line-number MATCH . | head -n 50"
+    monkeypatch.setattr(client, "current_tool", lambda: "search_files")
+    before = len(core.agents["B"].jobs)
+    with pytest.raises(client.HandsError, match=re.escape(messages.DEVICE_RG_UNAVAILABLE)):
+        env.execute(command)
+    assert len(core.agents["B"].jobs) == before
+    # The same command remains available to the foreground terminal without a file-tool guard.
+    result = env.execute(command, bounded_capture=True)
+    assert messages.DEVICE_RG_UNAVAILABLE not in result["output"], result
+    assert len(core.agents["B"].jobs) > before
+    assert any(shlex.quote(executable) in job["script"] for job in core.agents["B"].jobs[before:])

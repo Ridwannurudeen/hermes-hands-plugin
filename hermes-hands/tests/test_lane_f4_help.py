@@ -17,7 +17,6 @@ def help_plugin(plugin, tmp_path):
     ctx, hands, provider = plugin
     manager = PluginManager(scope_key=str(tmp_path))
     real_ctx = PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
-    ctx._gateway_injection_allowed = real_ctx._gateway_injection_allowed
     ctx._manager = manager
     ctx.inject_message = real_ctx.inject_message
     device = Device()

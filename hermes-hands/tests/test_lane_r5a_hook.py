@@ -118,7 +118,7 @@ def test_ordinary_user_folders_and_systemd_reads_still_reach_the_helper(hook, co
 
 
 def test_an_ordinary_user_folder_write_still_reaches_the_helper(hook):
-    assert hook("write_file", {"path": "user/models.py", "content": "x"})["action"] == "approve"
+    assert hook("write_file", {"path": "/home/x/user/models.py", "content": "x"})["action"] == "approve"
 
 
 @pytest.mark.parametrize(

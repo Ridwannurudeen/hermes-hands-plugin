@@ -170,6 +170,7 @@ def rig(hands_db, tmp_path, monkeypatch):
     hands = sys.modules["hermes_plugins.hermes_hands.hands"]
     monkeypatch.setattr(hands.relay.Relay, "start", lambda self: None)  # no heartbeat thread
     monkeypatch.setattr(hands.relay, "MAX_POLL_WAIT", 1)  # the agent's 25 s long-poll, shortened
+    monkeypatch.setattr(hands.relay, "_help_enabled", lambda: True)
 
     code = hands.store.mint_pairing_code("laptop")
     pairing = httpx.Client(transport=transport)
@@ -408,7 +409,9 @@ def test_file_contents_never_meet_the_device_deny_list(rig):
     shutdown is data the device writes, not a command its deny-list refuses."""
     files = ShellFileOperations(rig.environment())
     content = "run sudo apt install git\npool.shutdown(wait=True)\n"
-    written = files.write_file(f"{rig.device_home}/notes.md", content)
+    written = rig.hands.client.tool_execution(
+        tool_name="write_file", args={}, next_call=lambda _args: files.write_file(f"{rig.device_home}/notes.md", content)
+    )
     assert written.error is None and written.verified is True, written.to_dict()
     assert (rig.home / "notes.md").read_bytes() == content.encode("utf-8")
     job = next(job for job in rig.delivered if job.get("stdin") == content)
@@ -419,7 +422,9 @@ def test_file_tool_preserves_invalid_utf8_stdin_end_to_end(rig):
     raw = b"file data\xff\x80\n"
     content = raw.decode("utf-8", errors="surrogateescape")
     files = ShellFileOperations(rig.environment())
-    written = files.write_file(f"{rig.device_home}/binary.txt", content)
+    written = rig.hands.client.tool_execution(
+        tool_name="write_file", args={}, next_call=lambda _args: files.write_file(f"{rig.device_home}/binary.txt", content)
+    )
     assert written.error is None and written.verified is True, written.to_dict()
     assert (rig.home / "binary.txt").read_bytes() == raw
     encoded = base64.b64encode(raw).decode("ascii")
@@ -682,10 +687,21 @@ def _witness_agent(rig):
 
 
 def _approved(rig, env, command, timeout, outcome):
-    """A witness call the hook approved: its decision travels with every job of the call."""
+    """A witness call a person approved: its decision travels with every job of the call."""
+    client = rig.hands.client
+
+    def body(_args):
+        client.bind_tool_session(
+            rig.hands.store.device_by_id(rig.hands.store.get_device("laptop")["device_id"]),
+            session_id="s1", tool_call_id=command,
+        )
+        client.record_shown("s1", command, "terminal", {"command": command, "timeout": timeout}, "hands-witness:e2e")
+        client.record_approval("s1", command, "hands-witness:e2e")
+        # As core sends a terminal call: its own cwd record, "~" before there is one.
+        outcome.update(env.execute(command, "~", timeout=timeout, bounded_capture=True))
+
     def call():
-        rig.hands.client.bind_tool_session(rig.hands.store.device_by_id(rig.hands.store.get_device("laptop")["device_id"]))
-        outcome.update(env.execute(command, timeout=timeout))
+        client.tool_execution(args={}, next_call=body, session_id="s1", tool_call_id=command)
 
     worker = threading.Thread(target=call)
     worker.start()
@@ -735,8 +751,8 @@ def test_job_handed_out_while_stopping_reaches_the_helper_at_once(rig):
     assert not thread.is_alive() and errors == []
 
 
-def test_help_with_device_messages_turned_off_reaches_the_person_as_not_sent(rig):
-    rig.context.gateway_injection = False
+def test_help_with_device_messages_turned_off_reaches_the_person_as_not_sent(rig, monkeypatch):
+    monkeypatch.setattr(rig.hands.relay, "_help_enabled", lambda: False)
     witness, thread, errors = _witness_agent(rig)
     try:
         assert witness._send_help_request("my printer will not print") is False

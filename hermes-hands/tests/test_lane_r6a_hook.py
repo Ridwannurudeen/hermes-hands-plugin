@@ -220,4 +220,5 @@ def test_command_lines_nested_deeper_than_two_levels_are_refused(hook):
 def test_an_overlong_command_is_never_split_again():
     words = ["ls"] + [f"a b{index}" for index in range(100)]
     assert list(witness._inner_lines("ls", words)) == []
-    assert list(witness._inner_lines("ls", words[:3]))
+    assert list(witness._inner_lines("ls", words[:3])) == []
+    assert list(witness._inner_lines("make", ["make", "CMD=ls notes"]))

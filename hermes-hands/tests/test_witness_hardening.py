@@ -1,6 +1,6 @@
 import contextvars
 import hashlib
-import sys
+import threading
 import types
 
 import pytest
@@ -24,7 +24,6 @@ def fresh_tool_session(monkeypatch):
 @pytest.fixture
 def hook(monkeypatch):
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     return lambda tool, args=None, ctx=None: witness.pre_tool_call(ctx or object(), tool, args or {})
 
 
@@ -43,8 +42,8 @@ def test_safe_tools_resolve_device_before_passing(hook, monkeypatch, tool):
 
 @pytest.mark.parametrize("tool,args", [
     ("terminal", {"command": "cp " + "./" * 150 + "hidden/notes"}),
-    ("write_file", {"path": "./" * 150 + "hidden", "content": "x"}),
-    ("patch", {"mode": "replace", "path": "notes", "old_string": "x", "new_string": "y" * 1000}),
+    ("write_file", {"path": "/" + "./" * 150 + "hidden", "content": "x"}),
+    ("patch", {"mode": "replace", "path": "/notes", "old_string": "x", "new_string": "y" * 1000}),
 ])
 def test_long_arguments_are_blocked_without_truncation(hook, tool, args):
     result = hook(tool, args)
@@ -53,7 +52,7 @@ def test_long_arguments_are_blocked_without_truncation(hook, tool, args):
     assert ("~/" in result["message"]) == (tool == "write_file")
 
 
-@pytest.mark.parametrize("tool,source", [("vision_analyze", "image_path"), ("video_analyze", "video_url")])
+@pytest.mark.parametrize("tool,source", [("vision_analyze", "image_url"), ("video_analyze", "video_url")])
 def test_media_sources_require_approval(hook, tool, source):
     result = hook(tool, {source: "private.png", "question": "read it"})
     assert result["action"] == "approve"
@@ -82,7 +81,7 @@ def test_autostart_writes_blocked(hook, path, tool):
 
 
 def test_write_content_has_length_preview_digest(hook):
-    result = hook("write_file", {"path": "notes", "content": "hello"})
+    result = hook("write_file", {"path": "/notes", "content": "hello"})
     assert result["action"] == "approve"
     assert 'content length=5' in result["message"] and 'first 5 characters="hello"' in result["message"]
     assert f"sha256={hashlib.sha256(b'hello').hexdigest()[:16]} " in result["message"]
@@ -97,16 +96,6 @@ def test_flushdns_requires_git_bash_safe_form_and_owner_approval(hook):
     assert hook("terminal", {"command": "ipconfig /flushdns"})["action"] == "block"
     assert hook("terminal", {"command": "MSYS_NO_PATHCONV=1 ipconfig /flushdns"})["action"] == "approve"
 
-
-def test_approval_bypass_blocks_even_read_only_commands(hook, monkeypatch):
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: True)
-    assert hook("terminal", {"command": "pwd"})["action"] == "block"
-    assert hook("web_search") is None
-
-
-def test_other_hook_blocks_device_tools(hook):
-    ctx = types.SimpleNamespace(_manager=types.SimpleNamespace(_middleware={}, _hooks={"pre_tool_call": [lambda **kw: {"action": "modify", "args": {"command": "bad"}}]}))
-    assert hook("terminal", {"command": "pwd"}, ctx) == {"action": "block", "message": messages.WITNESS_HOOKS_BLOCKED}
 
 
 @pytest.mark.parametrize("tool,expected", [("web_search", None), ("new_tool", "block"), ("vision_analyze", "block")])
@@ -126,10 +115,10 @@ def test_control_characters_blocked_in_every_argument(hook, control, tool):
 
 
 def test_patch_replacement_content_is_fully_identified(hook):
-    result = hook("patch", {"path": "notes", "mode": "replace", "old_string": "old", "new_string": "new", "replace_all": True})
+    result = hook("patch", {"path": "/notes", "mode": "replace", "old_string": "old", "new_string": "new", "replace_all": True})
     assert result["action"] == "approve"
     assert result["message"] == messages.WITNESS_APPROVAL.format(
-        tool="patch", device="laptop", details='path=notes; mode=replace; replace_all=true; old_string="old"; new_string="new"'
+        tool="patch", device="laptop", details='path=/notes; mode=replace; replace_all=true; old_string="old"; new_string="new"'
     )
 
 
@@ -150,23 +139,8 @@ def test_shell_builtin_wrappers_are_blocked(hook, command):
 
 @pytest.mark.parametrize("tool", ["terminal", "read_file", "patch", "vision_analyze"])
 def test_approval_cap_applies_to_the_complete_rendering(hook, tool):
-    result = hook(tool, {"command": "touch notes", "path": "notes", "mode": "replace", "extra": "x" * 280})
+    result = hook(tool, {"command": "touch notes", "path": "/notes", "mode": "replace", "extra": "x" * 280})
     assert result == {"action": "block", "message": messages.WITNESS_ARGUMENTS_LONG.format(argument="extra")}
-
-
-def test_approval_bypass_reads_actual_core_policy(monkeypatch):
-    package = types.ModuleType("tools")
-    approval = types.ModuleType("tools.approval")
-    package.approval = approval
-    approval.get_current_session_key = lambda default="": "route-key"
-    calls = []
-    approval.is_approval_bypass_active_for_session = lambda key: calls.append(key) or key == "route-key"
-    approval._yolo_active = lambda: False
-    approval._unattended_contexts = lambda: []
-    monkeypatch.setitem(sys.modules, "tools", package)
-    monkeypatch.setitem(sys.modules, "tools.approval", approval)
-    assert witness._approval_bypassed()
-    assert calls == ["route-key"]
 
 
 def test_session_id_does_not_change_the_resolved_target(hook, monkeypatch):
@@ -191,38 +165,100 @@ def test_cron_stays_on_the_server_even_with_a_device_route(monkeypatch, hands_db
     assert witness._witness_device(ctx) is None
 
 
-def test_our_registered_hook_is_not_treated_as_another_plugin(hook):
-    from functools import partial
 
-    ctx = types.SimpleNamespace(_manager=types.SimpleNamespace(_middleware={}, _hooks={}))
-    ctx._manager._hooks["pre_tool_call"] = [partial(witness.pre_tool_call, ctx)]
-    assert hook("terminal", {"command": "touch notes"}, ctx)["action"] == "approve"
+class _Guard:
+    def before_call(self, name, args):
+        return types.SimpleNamespace(allows_execution=True)
 
 
-@pytest.mark.parametrize("bypass", ["process-yolo", "session-yolo", "mode-off"])
-def test_actual_hermes_bypass_settings_block_device_calls(monkeypatch, bypass):
-    approval = pytest.importorskip("tools.approval")
-    monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(approval, "get_current_session_key", lambda default="": "route-key")
-    monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", bypass == "process-yolo")
-    monkeypatch.setattr(approval, "_session_yolo", {"route-key"} if bypass == "session-yolo" else set())
-    monkeypatch.setattr(approval.approval_context, "_get_approval_mode", lambda: "off" if bypass == "mode-off" else "manual")
-    result = witness.pre_tool_call(object(), "terminal", {"command": "pwd"})
-    assert result["action"] == "block"
-    assert "yolo" in result["message"]
+def _agent():
+    return types.SimpleNamespace(
+        session_id="sess-1", _current_turn_id="turn-1", _current_api_request_id="req-1",
+        _tool_guardrails=_Guard(), tool_progress_callback=None, _touch_activity=lambda *a, **k: None,
+        _interrupt_requested=False, _tool_interrupt_reason=None, _tool_worker_threads=set(),
+        _tool_worker_threads_lock=threading.Lock(), _context_engine_tool_names=set(), _memory_manager=None,
+        valid_tool_names=None, enabled_toolsets=None, disabled_toolsets=None, quiet_mode=True,
+        _should_emit_quiet_tool_messages=lambda: False, tool_start_callback=None,
+        _checkpoint_mgr=types.SimpleNamespace(enabled=False), interrupt=lambda **k: None,
+    )
 
 
-def test_actual_hermes_hook_registry_blocks_foreign_modifiers(monkeypatch, tmp_path):
+@pytest.mark.parametrize("situation,expected", [
+    ("cli-yes", "ran"), ("gateway-yes", "ran"), ("cli-no", "blocked"), ("process-yolo", "refused"),
+    ("session-yolo", "refused"), ("mode-off", "refused"), ("unattended-approve", "refused"),
+])
+def test_actual_hermes_gate_lets_only_a_human_yes_reach_the_device(monkeypatch, tmp_path, situation, expected):
+    """The real plugin manager, approval gate and agent loop executor: every bypass approves the call
+    without asking anyone, so its device job is refused; a person's yes lets it run."""
     plugins = pytest.importorskip("hermes_cli.plugins")
+    from agent import tool_executor
+    from gateway.session_context import set_session_vars
     from hermes_cli.plugins_manifest import PluginManifest
+    import tools.approval as approval
+    from tools import approval_context, terminal_tool
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    for name in ("HERMES_INTERACTIVE", "HERMES_EXEC_ASK", "HERMES_GATEWAY_SESSION", "HERMES_YOLO_MODE"):
+        monkeypatch.delenv(name, raising=False)
     manager = plugins.PluginManager()
     ctx = plugins.PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
-    monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     witness.register(ctx)
-    assert witness.pre_tool_call(ctx, "terminal", {"command": "touch notes"})["action"] == "approve"
-    ctx.register_hook("pre_tool_call", lambda **kwargs: {"action": "modify", "args": {"command": "hidden"}})
-    result = witness.pre_tool_call(ctx, "terminal", {"command": "touch notes"})
-    assert result == {"action": "block", "message": messages.WITNESS_HOOKS_BLOCKED}
+    ctx.register_middleware("tool_execution", client.tool_execution)
+    monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
+    monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
+    monkeypatch.setattr(client, "_APPROVED_CALLS", {})
+    config = {"mode": "off" if situation == "mode-off" else "manual"}
+    monkeypatch.setattr(approval_context, "_get_approval_config", lambda: config)
+    monkeypatch.setattr(approval_context, "_get_unattended_approval_mode", lambda: "approve")
+    monkeypatch.setattr(approval, "_YOLO_MODE_FROZEN", situation == "process-yolo")
+    jobs, approvals = [], []
+    manager._hooks["post_approval_response"].append(lambda **kwargs: approvals.append(kwargs))
+
+    def execute(_args):
+        try:
+            jobs.append(client._decision_fields())
+        except client.HandsError as exc:
+            jobs.append(str(exc))
+        return "{}"
+
+    def run():
+        key = "agent:main:telegram:dm:hands"
+        if situation.startswith("cli"):
+            approval_context.set_hermes_interactive_context(True)
+            approval_context.set_current_session_key("cli:sess-1")
+            terminal_tool.set_approval_callback(lambda *a, **k: "deny" if situation == "cli-no" else "once")
+        elif situation == "unattended-approve":
+            set_session_vars(platform="api_server", source="api_server", session_key="api:hands", session_id="sess-1")
+            approval_context.set_current_session_key("api:hands")
+        else:
+            set_session_vars(platform="telegram", source="telegram", session_key=key, session_id="sess-1")
+            approval_context.set_current_session_key(key)
+            if situation == "session-yolo":
+                approval.enable_session_yolo(key)
+            approval.register_gateway_notify(
+                key,
+                lambda _data: threading.Thread(target=approval.resolve_gateway_approval, args=(key, "once")).start(),
+            )
+        try:
+            return tool_executor._run_sequential_tool_execution_middleware(
+                _agent(), function_name="terminal", function_args={"command": "touch notes"},
+                effective_task_id="task-1", tool_call_id="call-1", execute=execute,
+            )
+        finally:
+            terminal_tool.set_approval_callback(None)
+            approval.unregister_gateway_notify(key)
+            approval.disable_session_yolo(key)
+
+    result = contextvars.copy_context().run(run)
+
+    assert client._RUNNING_CALLS == {} and client._APPROVED_CALLS == {}
+    if expected == "blocked":
+        assert result.blocked and jobs == []
+        return
+    assert not result.blocked, result.result
+    if expected == "refused":
+        assert approvals == [] and jobs == [messages.WITNESS_NOT_APPROVED]
+        return
+    assert [(kw["choice"], kw["session_id"], kw["tool_call_id"]) for kw in approvals] == [("once", "sess-1", "call-1")]
+    assert approvals[0]["pattern_key"].startswith("plugin_rule:hands-witness:")
+    assert jobs == [{"decision": {"device_id": "device-id", "state": [True, "active", "serve-1"]}}]

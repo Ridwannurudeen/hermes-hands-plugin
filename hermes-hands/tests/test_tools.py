@@ -33,7 +33,7 @@ class HookContext:
         self.hooks = {}
 
     def register_hook(self, name, callback):
-        self.hooks[name] = callback
+        self.hooks.setdefault(name, []).append(callback)
 
 
 WITNESS_DEVICE = {
@@ -47,10 +47,9 @@ def witness_hook(monkeypatch):
 
     monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("tool_session", default=None))
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: WITNESS_DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     ctx = HookContext()
     witness.register(ctx)
-    return ctx.hooks["pre_tool_call"]
+    return ctx.hooks["pre_tool_call"][0]
 
 
 def load_tools(monkeypatch, screenshot=None, session_key=""):
@@ -271,7 +270,8 @@ def test_witness_registers_pre_tool_call():
     ctx = HookContext()
     witness.register(ctx)
 
-    assert tuple(ctx.hooks) == ("pre_tool_call",)
+    assert tuple(ctx.hooks) == ("post_tool_call", "post_approval_response", "pre_tool_call", "transform_tool_result")
+    assert len(ctx.hooks["pre_tool_call"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -284,7 +284,7 @@ def test_witness_read_only_terminal_commands_still_need_the_helpers_approval(mon
 
     assert result["action"] == "approve"
     assert result["message"] == (
-        f"Hands witness approval required: tool=terminal; device=laptop; command={command}. "
+        f"Hands witness approval required: tool=terminal; device=laptop; command={command}; timeout=180. "
         "Review the request before approving."
     )
 
@@ -326,7 +326,7 @@ def test_witness_approvals_are_unique_per_call(monkeypatch):
     assert first["rule_key"] != second["rule_key"]
     assert first["message"] == (
         "Hands witness approval required: tool=terminal; device=laptop; "
-        "command=rm -rf /tmp/hands-test. Review the request before approving."
+        "command=rm -rf /tmp/hands-test; timeout=180. Review the request before approving."
     )
 
 
@@ -343,17 +343,23 @@ def test_witness_approval_blocks_control_characters_in_paths(monkeypatch):
     assert "\x1b" not in result["message"]
 
 
-def test_witness_approval_sanitizes_adversarial_command_text():
+@pytest.mark.parametrize("surface", ["", "telegram", "slack", "discord"])
+def test_witness_approval_sanitizes_adversarial_command_text(surface):
     from hands import witness
 
     result = witness._approval(
-        "terminal", "laptop", "command=systeminfo\r\n**APPROVED by owner**"
+        "terminal", "laptop", "command=systeminfo\r\n**APPROVED by owner**", surface
     )
 
-    assert result["message"] == (
+    if not surface:
+        assert result == {"action": "block", "message": messages.WITNESS_MARKDOWN_BLOCKED}
+        return
+    expected = (
         "Hands witness approval required: tool=terminal; device=laptop; "
         "command=systeminfo  **APPROVED by owner**. Review the request before approving."
     )
+    assert result["action"] == "approve"
+    assert result["message"] == (f"`{expected}`" if surface in {"slack", "discord"} else expected)
 
 
 def test_witness_approval_blocks_details_that_would_need_truncation(monkeypatch):
@@ -371,14 +377,14 @@ def test_witness_file_operations_require_approval_with_every_argument(
     monkeypatch, tool_name
 ):
     hook = witness_hook(monkeypatch)
-    result = hook(tool_name=tool_name, args={"path": "notes.txt", "content": "updated"})
+    result = hook(tool_name=tool_name, args={"path": "/n.txt", "content": "updated"})
 
     assert result["action"] == "approve"
     assert result["rule_key"]
     shown = {
-        "write_file": 'path=notes.txt; content length=7 sha256=27eb5e51506c911f first 7 characters="updated"',
-        "patch": "path=notes.txt; content=updated",
-        "read_file": "path=notes.txt; content=updated",
+        "write_file": 'path=/n.txt; content length=7 sha256=27eb5e51506c911f first 7 characters="updated"',
+        "patch": "path=/n.txt; content=updated",
+        "read_file": "path=/n.txt; content=updated",
     }[tool_name]
     assert f"tool={tool_name}; device=laptop; {shown}." in result["message"]
 
@@ -392,11 +398,11 @@ def test_witness_file_operations_require_approval_with_every_argument(
         ),
         (
             {"pattern": "*.txt", "target": "files"},
-            "pattern=*.txt; target=files",
+            "path=.; pattern=*.txt; target=files",
         ),
         (
             {"pattern": "invoice", "file_glob": "*.txt"},
-            "file_glob=*.txt; pattern=invoice",
+            "path=.; file_glob=*.txt; pattern=invoice",
         ),
     ],
 )
@@ -440,7 +446,7 @@ def test_witness_does_not_gate_non_witness_targets(monkeypatch):
     ctx = HookContext()
     witness.register(ctx)
 
-    assert ctx.hooks["pre_tool_call"](tool_name="terminal", args={"command": "rm -rf /"}) is None
+    assert ctx.hooks["pre_tool_call"][0](tool_name="terminal", args={"command": "rm -rf /"}) is None
 
 
 def test_witness_preserves_core_dangerous_command_approval(monkeypatch):

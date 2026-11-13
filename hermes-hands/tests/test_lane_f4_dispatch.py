@@ -15,6 +15,7 @@ def dispatch(hands_db, monkeypatch):
 
     monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("f4_dispatch", default=None))
     monkeypatch.setattr(client, "_CALL_SESSIONS", {})
+    monkeypatch.setattr(client, "_APPROVED_CALLS", {})
     manager = plugins.PluginManager(scope_key=str(hands_db))
     manager._middleware["tool_execution"] = [client.tool_execution]
     monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
@@ -92,11 +93,15 @@ def test_dispatch_binding_is_consumed_once_and_cache_miss_refuses_witness(dispat
     store.record_seen(device.device_id, witness=True, session_state="active", instance="w1")
     snapshot = store.device_by_id(device.device_id)
     _dispatch_binding(manager, snapshot, "s1", "call")
+    client.record_shown("s1", "call", "terminal", {}, "hands-witness:f4")
+    client.record_approval("s1", "call", "hands-witness:f4")
     observed = execute("terminal", {}, lambda _args: client._decision_fields(),
                        session_id="s1", tool_call_id="call")
     assert observed["decision"]["state"] == [True, "active", "w1"]
+    # A binding without a call id has no approval a person could have given.
     client.bind_tool_session(snapshot)
-    caller = client._decision_fields()
+    with pytest.raises(client.HandsError, match="nobody answered"):
+        client._decision_fields()
     attempts = []
 
     def start(_args):
@@ -106,8 +111,7 @@ def test_dispatch_binding_is_consumed_once_and_cache_miss_refuses_witness(dispat
     with pytest.raises(client.HandsError, match="session changed after the tool decision"):
         execute("terminal", {}, start, session_id="s1", tool_call_id="call")
     assert attempts == [{}]
-    assert client._decision_fields() == caller
-    assert client._CALL_SESSIONS == {}
+    assert client._CALL_SESSIONS == {} and client._APPROVED_CALLS == {}
     assert not hub._jobs
 
 
@@ -179,8 +183,6 @@ def test_actual_witness_hook_hands_snapshot_to_real_dispatch_middleware(dispatch
         capabilities=["witness-v1"] if active else [],
     )
     monkeypatch.setattr(environment, "resolve_current_target", lambda _ctx: "laptop")
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
-    monkeypatch.setattr(witness, "_other_hooks", lambda _ctx: False)
     ctx = SimpleNamespace(current_cron_execution=lambda: None)
     with scoped_session_key("route-1"):
         decision = manager._run_hook_callback_bounded(
@@ -191,6 +193,10 @@ def test_actual_witness_hook_hands_snapshot_to_real_dispatch_middleware(dispatch
         )
     if active:
         assert decision["action"] == "approve"
+        witness.post_approval_response(
+            choice="once", pattern_key=f"plugin_rule:{decision['rule_key']}",
+            session_id="agent-1", tool_call_id="actual-hook-call",
+        )
     else:
         assert decision is None
     observed = execute("terminal", {}, lambda _args: client._decision_fields(),

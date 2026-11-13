@@ -73,7 +73,6 @@ def gate(monkeypatch):
     monkeypatch.setattr(client, "_TOOL_SESSION", contextvars.ContextVar("r3b1_skill", default=None))
     monkeypatch.setattr(client, "_CALL_SESSIONS", {})
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     return lambda command: witness.pre_tool_call(object(), "terminal", {"command": command})
 
 
@@ -140,7 +139,8 @@ def test_witness_rules_name_the_blocked_symbols_persistence_and_other_plugin_rem
     assert "because it would outlast the 30 minute session" in normalized
     assert "The list is not complete." in normalized
     assert "including commands that can start other programs, waits for the helper" in normalized
-    assert "`hermes plugins disable <name>` for a plugin" in normalized
+    assert "the device also refuses a command that is not the one the helper approved" in normalized
+    assert "`hermes plugins disable <name>` for a plugin" not in normalized
     assert "If a refusal names an argument that is too long, shorten that argument" in normalized
     assert "prefer short `~/...` paths in file tools and commands" not in normalized
 

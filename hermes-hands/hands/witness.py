@@ -1,13 +1,17 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import html
+import io
 import json
+import os
 import posixpath
 import re
 import secrets
 import shlex
+import tokenize
 import unicodedata
 from functools import partial
 
@@ -42,13 +46,31 @@ _BLOCKED_TOOLS = frozenset(
         "annotate_preview", "focus_pane",
     }
 )
-# Discord cuts the approval reason at 300 characters (plugins/platforms/discord/adapter.py:5645);
-# Telegram and Slack cut at 500, Telegram in UTF-16 units after html.escape (adapter.py:4233-4236).
+# Discord cuts the approval reason at 300 characters; Telegram at 500 escaped UTF-16 units.
+# Keep the other surfaces at 300, including Slack after entity escaping and code wrapping.
 _SURFACE_LIMIT = 300
 _PREVIEW_MIN = 20
+_MARKDOWN_CONTROL = re.compile(r"\*\*|__|~~|\|\||`|\[[^\]]*\]\([^)]*\)|(?<!\w)[*_](?=\w)|(?<=\w)[*_](?!\w)")
 _DESTINATION_KEYS = {
     "terminal": "command", "read_file": "path", "search_files": "path", "write_file": "path",
-    "patch": "path", "vision_analyze": "image_path", "video_analyze": "video_url",
+    "patch": "path", "vision_analyze": "image_url", "video_analyze": "video_url",
+}
+# The approve tools' argument types (terminal_tool.py, file_tools.py and vision_tools.py schemas
+# in Hermes v0.23.0 and v0.23.1).
+_ARGUMENT_TYPES = {
+    "terminal": {
+        "command": (str,), "background": (bool,), "timeout": (int,), "workdir": (str,), "pty": (bool,),
+        "notify": (bool, list), "heartbeat": (int,), "persist_on_release": (bool,),
+    },
+    "read_file": {"path": (str,), "offset": (int,), "limit": (int,)},
+    "search_files": {
+        "pattern": (str,), "target": (str,), "path": (str,), "file_glob": (str,), "limit": (int,),
+        "offset": (int,), "order": (str,), "output_mode": (str,), "context": (int,),
+    },
+    "write_file": {"path": (str,), "content": (str,)},
+    "patch": {"path": (str,), "old_string": (str,), "new_string": (str,), "replace_all": (bool,)},
+    "vision_analyze": {"image_url": (str,), "question": (str,), "region": (list,)},
+    "video_analyze": {"video_url": (str,), "question": (str,)},
 }
 # The only arguments that may hold line breaks; they are shown JSON-escaped on one line.
 _CONTENT_KEYS = {"write_file": ("content",), "patch": ("old_string", "new_string")}
@@ -164,9 +186,30 @@ _SHELL_META = frozenset(";&|<>`$(){}*?[]~#!%")
 _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 _SWITCH = re.compile(r"^(?:-{1,2}|/)([^:=]*)")
 _V4A = re.compile(r"\*\*\*\s*(?:Begin Patch|End Patch|(?:Update|Add|Delete|Move)\s+File:)")
-# Without Hermes core, refuse what its redaction or display escaping (agent/redact.py:922-963) could change.
+# Structured credentials, not words in ordinary names. Core's public redactor also covers
+# provider formats and registered patterns (agent/redact.py).
+_SECRET_NAME = (
+    r"\b(?:(?:api|secret)[_ -]?key|(?:access|refresh|auth)[_-]?token|token|secret|password|passwd|pass|pwd|"
+    r"credential|private[_ -]?key|authorization|AccountKey|X-Amz-Signature)\b"
+)
+_SECRET_ASSIGNMENT = re.compile(_SECRET_NAME + r"[\"']?\s*[:=]\s*", re.I)
+_OPAQUE_SOURCE_VALUE = re.compile(r"[A-Za-z_][A-Za-z0-9._~+/-]{19,}(?=$|[\s\"';,)\]}])")
+_SOURCE_SUFFIXES = frozenset({
+    ".py", ".js", ".jsx", ".ts", ".tsx", ".go", ".rs", ".java", ".kt", ".rb", ".php",
+    ".c", ".cc", ".cpp", ".h", ".hpp", ".cs", ".swift", ".scala", ".lua", ".sh", ".bash", ".zsh", ".ps1",
+})
+_SLASH_COMMENT_SUFFIXES = _SOURCE_SUFFIXES - {".py", ".rb", ".lua", ".sh", ".bash", ".zsh", ".ps1"}
 _SECRET_HINT = re.compile(
-    r"key|token|secret|passw|bearer|authorization|credential|private key|sk-|ghp_|gho_|github_pat_|xox[abprs]-|akia|aiza",
+    r"(?P<assignment>" + _SECRET_NAME + r"=[^\s;,]+)"
+    r"|\bBearer\s+(?:\[[^\]]+\]|[A-Za-z0-9._~+/-]{20,}=*)"
+    r"|-----BEGIN (?:(?:[A-Z0-9]+ )*PRIVATE KEY|PGP PRIVATE KEY BLOCK)-----"
+    r"|(?<![\w-])--password(?:=|[ \t]+)[\"']?[^\s\"'-][^\s\"';]*"
+    r"|\b(?:mysql|mariadb|sshpass)(?:\.exe)?[ \t]+[^\r\n;]*?(?<!\S)(?-i:-p)[ \t]*[\"']?(?!\.(?:\s|$))[^\s\"';-][^\s\"';]*"
+    r"|\bcurl(?:\.exe)?[ \t]+[^\r\n;]*?(?<!\S)(?:-u[ \t]*|--user(?:=|[ \t]+))[\"']?[^\s\"':]+:[^\s\"';]+"
+    r"|https://hooks\.slack(?:-gov)?\.com/services/[^\s\"'<>]+"
+    r"|\bya29\.[A-Za-z0-9._~-]+"
+    r"|\b(?:sk-[A-Za-z0-9_-]+|gh[po]_[A-Za-z0-9]+|github_pat_[A-Za-z0-9_]+"
+    r"|xox[a-z]*-[A-Za-z0-9-]+|AKIA[A-Z0-9]+|AIza[A-Za-z0-9_-]+)\b",
     re.I,
 )
 # Startup persistence outlasts the 30 minute session: Windows Startup, XDG autostart, macOS
@@ -217,11 +260,64 @@ _TAR_PROGRAMS = (
 # Vim runs editor commands from -c, --cmd and +cmd and scripts from -S, -s and -u; :w writes any file.
 _VIM_PROGRAMS = frozenset({"vim", "vi", "nvim", "ex", "view", "gvim", "gview", "rvim", "rview", "vimdiff"})
 _FIND_RUNS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+# These environment values select commands, executable code or Git configuration that can do so.
+_COMMAND_ENV = frozenset({
+    "GIT_SSH_COMMAND", "GIT_SSH", "GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "GIT_PAGER",
+    "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
+    "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "SSH_ASKPASS", "PAGER", "EDITOR",
+    "VISUAL", "LD_PRELOAD", "LD_AUDIT", "RSYNC_RSH",
+})
+_GIT_COMMAND_CONFIG = frozenset({
+    "core.editor", "core.sshcommand", "core.pager", "core.askpass", "core.gitproxy",
+    "core.hookspath", "core.fsmonitor", "sequence.editor", "diff.external", "credential.helper", "gpg.program",
+    "core.alternaterefscommand", "imap.tunnel", "uploadpack.packobjectshook", "gpg.ssh.defaultkeycommand",
+    "man.viewer", "web.browser", "init.templatedir", "include.path", "protocol.allow",
+    "gc.recentobjectshook", "interactive.difffilter", "help.browser", "instaweb.browser", "instaweb.httpd",
+})
 _BLANK_GLYPHS = frozenset("\u034f\u115f\u1160\u17b4\u17b5\u180b\u180c\u180d\u180f\u2800\u3164\uffa0")
+# A person's answers. Yolo, approvals off, unattended approve and the session cache approve without
+# firing post_approval_response (tools/approval.py:1072-1105); smart_approve is an LLM's.
+_HUMAN_CHOICES = frozenset({"once", "session", "always"})
+_RULE_PREFIX = "hands-witness:"
 
 
 def register(ctx) -> None:
+    from . import client
+
+    ctx.register_hook("post_tool_call", client.post_tool_call)
+    ctx.register_hook("post_approval_response", client.post_approval_response)
     ctx.register_hook("pre_tool_call", partial(pre_tool_call, ctx))
+    ctx.register_hook("pre_tool_call", client.explicit_terminal_timeout)
+    ctx.register_hook("post_approval_response", post_approval_response)
+    ctx.register_hook("transform_tool_result", transform_tool_result)
+
+
+def post_approval_response(
+    *, choice: str = "", pattern_key: str = "", session_id: str = "", tool_call_id: str = "", **kwargs
+) -> None:
+    from . import client
+
+    # Other cards fire this hook with the same call ids: dangerous commands, protected file writes, and
+    # another plugin's approve that core picked first (hermes_cli/plugins.py:1953). Only the exact rule
+    # key of this call's own card counts (client.record_approval).
+    if choice in _HUMAN_CHOICES and pattern_key.startswith(f"plugin_rule:{_RULE_PREFIX}"):
+        client.record_approval(session_id, tool_call_id, pattern_key.removeprefix("plugin_rule:"))
+
+
+def transform_tool_result(
+    *, tool_name: str = "", session_id: str = "", tool_call_id: str = "", status: str = "", **kwargs
+) -> str | None:
+    """A read or search whose device command Hands refused shows Hands' message (client.py);
+    every other result is left as it is."""
+    try:
+        from tools.registry import tool_error
+
+        from . import client
+
+        message = client.take_refusal(session_id, tool_call_id, tool_name)
+        return tool_error(message) if message is not None else None
+    except Exception:
+        return None
 
 
 def _selected_device(ctx) -> dict | None:
@@ -270,28 +366,235 @@ def _visible(char: str) -> bool:
     return ord(char) > 127 and unicodedata.category(char)[0] in "LNPS" and char not in _BLANK_GLYPHS
 
 
-def _display_problem(message: str) -> str | None:
+def _source_tail(value: str, *, slash_comments: bool = False, arguments: bool = False) -> bool:
+    tail = value.lstrip(" \t")
+    while slash_comments and tail.startswith("/*"):
+        end = tail.find("*/", 2)
+        if end < 0:
+            return False
+        tail = tail[end + 2:].lstrip(" \t")
+    if arguments:
+        if re.match(r",[ \t]*(?:[\"']?[A-Za-z_]\w*[\"']?[ \t]*[:=]|[)\]}])", tail):
+            return True
+        closing = re.match(r"[)\]}]+:?[ \t]*", tail)
+        if closing is not None:
+            tail = tail[closing.end():]
+    return not tail or tail[0] in "\r\n;#" or slash_comments and tail.startswith("//")
+
+
+def _source_expression(value: str, *, slash_comments: bool = False, arguments: bool = False) -> bool:
+    if value.startswith("(") or re.match(r"await\b", value):
+        end, depth = len(value), 0
+        lines = value.splitlines(keepends=True)
+        try:
+            for token in tokenize.generate_tokens(io.StringIO(value).readline):
+                if not depth and (
+                    token.type in {tokenize.NEWLINE, tokenize.ENDMARKER}
+                    or token.type == tokenize.OP and token.string in ";,)]}"
+                ):
+                    end = sum(map(len, lines[:token.start[0] - 1])) + token.start[1]
+                    break
+                if token.type == tokenize.OP:
+                    depth += token.string in "([{"
+                    depth -= token.string in ")]}"
+            if not _source_tail(value[end:], slash_comments=slash_comments, arguments=arguments):
+                return False
+            expression = ast.parse(value[:end], mode="eval").body
+        except (SyntaxError, ValueError, tokenize.TokenError):
+            return False
+        if isinstance(expression, ast.Await):
+            expression = expression.value
+            if not isinstance(expression, ast.Call) or any(
+                isinstance(node, (ast.Await, ast.Yield, ast.YieldFrom)) for node in ast.walk(expression)
+            ):
+                return False
+        if not isinstance(expression, (ast.Call, ast.Attribute, ast.Subscript, ast.Name, ast.Constant, ast.UnaryOp)):
+            return False
+        inner = ast.get_source_segment(value, expression)
+        if inner is None or inner == value:
+            return False
+        return _source_expression(inner, slash_comments=slash_comments, arguments=arguments) or (
+            isinstance(expression, ast.Name) and _OPAQUE_SOURCE_VALUE.match(inner) is None
+        )
+    initial = re.match(
+        r"(?P<number>[-+]?(?:0[xX][\da-fA-F_]+|0[bB][01_]+|0[oO][0-7_]+|(?:\d[\d_]*(?:\.[\d_]*)?|\.\d[\d_]*)(?:[eE][-+]?\d[\d_]*)?))"
+        r"|(?P<environment>\$(?:[A-Za-z_]\w*\{[A-Za-z_]\w*\}|\{[A-Za-z_]\w*\}|[A-Za-z_]\w*(?::[A-Za-z_]\w*)?))"
+        r"|[A-Za-z_]\w*", value
+    )
+    if initial is None:
+        return False
+    index = initial.end()
+    expression = initial.lastgroup is not None
+    while initial.lastgroup is None:
+        while index < len(value) and value[index] in " \t":
+            index += 1
+        attribute = re.match(r"\.[A-Za-z_]\w*", value[index:])
+        if attribute is not None:
+            index += attribute.end()
+            expression = True
+            continue
+        if index >= len(value) or value[index] not in "([":
+            break
+        expression = True
+        stack = [{"(": ")", "[": "]"}[value[index]]]
+        index += 1
+        quote = ""
+        while index < len(value) and stack:
+            char = value[index]
+            if quote:
+                if char == "\\":
+                    index += 2
+                elif value.startswith(quote, index):
+                    index += len(quote)
+                    quote = ""
+                else:
+                    index += 1
+                continue
+            if char in "\"'`":
+                quote = char * 3 if value.startswith(char * 3, index) else char
+                index += len(quote)
+                continue
+            if char == "#" or slash_comments and value.startswith("//", index):
+                while index < len(value) and value[index] not in "\r\n":
+                    index += 1
+                continue
+            if slash_comments and value.startswith("/*", index):
+                end = value.find("*/", index + 2)
+                if end < 0:
+                    return False
+                index = end + 2
+                continue
+            if char in "([{":
+                stack.append({"(": ")", "[": "]", "{": "}"}[char])
+            elif char in ")]}":
+                if char != stack.pop():
+                    return False
+            index += 1
+        if stack or quote:
+            return False
+    return expression and _source_tail(value[index:], slash_comments=slash_comments, arguments=arguments)
+
+
+def _python_source_assignments(message: str) -> bool:
     try:
-        from agent.redact import redact_approval_display, sanitize_command_for_display
-    except ImportError:
-        if " " * 21 in message or not all(map(_visible, message)):
-            return messages.WITNESS_CONTROL_CHARACTERS_BLOCKED
-        return messages.WITNESS_SECRET_BLOCKED if _SECRET_HINT.search(message) else None
-    # Every approval surface shows the redacted copy (tools/approval.py:935-936); force ignores the config switch.
-    if sanitize_command_for_display(message) != message:
-        return messages.WITNESS_CONTROL_CHARACTERS_BLOCKED
-    if redact_approval_display(message, force=True) != message:
+        tree = ast.parse(message)
+    except (SyntaxError, ValueError):
+        return False
+    positions = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            positions.update((target.lineno, target.col_offset) for target in node.targets if isinstance(target, ast.Name))
+        elif isinstance(node, ast.keyword) and node.arg is not None:
+            positions.add((node.lineno, node.col_offset))
+    assignments = list(_SECRET_ASSIGNMENT.finditer(message))
+    return bool(assignments) and all(
+        (
+            message.count("\n", 0, assignment.start()) + 1,
+            len(message[message.rfind("\n", 0, assignment.start()) + 1:assignment.start()].encode("utf-8")),
+        ) in positions
+        for assignment in assignments
+    )
+
+
+def _secret_problem(message: str, *, source: bool = False, card: bool = False, slash_comments: bool = False, unspaced: bool = True, spacing_hint: bool = False) -> str | None:
+    from agent.redact import redact_sensitive_text
+
+    if redact_sensitive_text(message, force=True) != message:
+        if source and not card and unspaced and spacing_hint and _python_source_assignments(message):
+            spaced = _SECRET_ASSIGNMENT.sub(
+                lambda assignment: re.sub(r"[ \t]*=[ \t]*$", " = ", assignment.group()), message
+            )
+            if (
+                spaced != message
+                and redact_sensitive_text(spaced, force=True) == spaced
+                and _secret_problem(spaced, source=True, slash_comments=slash_comments) is None
+                and not any(
+                    _OPAQUE_SOURCE_VALUE.match(message[assignment.end():])
+                    for assignment in _SECRET_ASSIGNMENT.finditer(message)
+                )
+            ):
+                return (
+                    messages.WITNESS_SECRET_HIDDEN
+                    + " if this is ordinary code, writing it with spaces around = (token = token) is not masked"
+                )
+        return messages.WITNESS_SECRET_HIDDEN
+    if any(
+        hint.lastgroup != "assignment" or not (source and unspaced)
+        for hint in _SECRET_HINT.finditer(message)
+    ):
         return messages.WITNESS_SECRET_BLOCKED
+    for assignment in _SECRET_ASSIGNMENT.finditer(message):
+        value = message[assignment.end():]
+        arguments = source and unspaced
+        compact = arguments and re.fullmatch(_SECRET_NAME + r"[\"']?[:=]", assignment.group(), re.I) is not None
+        # Spaced source assignments retain their existing behavior.
+        if compact:
+            hint = _SECRET_HINT.search(value)
+            if hint is not None and hint.lastgroup != "assignment":
+                return messages.WITNESS_SECRET_BLOCKED
+            if re.match(r"(?:os\.(?:environb?|getenv)|process\.env)", value) and not re.match(
+                r"(?:os\.getenv\s*\(|os\.environ(?:\s*\[|\.get\s*\()|process\.env(?:\.[A-Za-z_]\w*|\s*\[))", value
+            ):
+                return messages.WITNESS_SECRET_BLOCKED
+        # Core's YAML matcher is line-anchored; a credential mapping inside prose is
+        # still a literal, even when the surrounding text keeps core from masking it.
+        fragment = assignment.group() + re.split(r"[\"'\r\n]", value, maxsplit=1)[0]
+        if not compact and redact_sensitive_text(fragment, force=True) != fragment:
+            return messages.WITNESS_SECRET_BLOCKED
+        if re.match(r"Bearer\s+\S+", value, re.I):
+            return messages.WITNESS_SECRET_BLOCKED
+        # A literal stays a literal in the JSON-escaped approval copy too.
+        literal = re.match(r"(?:[rubf]{1,2})?((?:\\?\"){3}|(?:\\?'){3}|\\?[\"'`])(.*?)\1", value, re.I | re.S)
+        if literal is not None:
+            tail = value[literal.end():].lstrip(" \t")
+            value = literal.group(2)
+            if (
+                value not in {"", "...", "xxx"}
+                and not re.fullmatch(r"<[^<>\s]+>|\$\{[A-Za-z_]\w*\}|\$[A-Za-z_]\w*", value)
+                or not card and not _source_tail(tail, slash_comments=slash_comments, arguments=arguments)
+            ):
+                return messages.WITNESS_SECRET_BLOCKED
+            continue
+        if compact and not card and _OPAQUE_SOURCE_VALUE.match(value):
+            return messages.WITNESS_SECRET_BLOCKED
+        if card or source and _source_expression(value, slash_comments=slash_comments, arguments=arguments):
+            continue
+        if re.match(r"[A-Za-z0-9._~+/-]{20,}(?=$|[\s\"';,])", value):
+            return messages.WITNESS_SECRET_BLOCKED
+        if not source and value.strip():
+            return messages.WITNESS_SECRET_BLOCKED
+        if source and not card:
+            bare = re.match(r"[A-Za-z_]\w*", value)
+            if bare is None or not _source_tail(value[bare.end():], slash_comments=slash_comments, arguments=arguments):
+                return messages.WITNESS_SECRET_BLOCKED
     return None
 
 
-def _coerced(tool_name: str, args: dict) -> dict:
-    try:
-        from tools.arg_coercion import coerce_tool_args
-    except ImportError:
-        return copy.deepcopy(args)
-    # The agent path coerces the arguments only after this hook runs (model_tools.py:902).
-    return coerce_tool_args(tool_name, copy.deepcopy(args))
+def _contains_secret(message: str, *, source: bool = False) -> bool:
+    return _secret_problem(message, source=source) is not None
+
+def _display_problem(message: str) -> str | None:
+    if " " * 21 in message or not all(map(_visible, message)):
+        return messages.WITNESS_CONTROL_CHARACTERS_BLOCKED
+    # Every approval surface shows the redacted copy (tools/approval.py:935-936); force ignores the config switch.
+    # Complete arguments have already been scanned with their file context. This copy
+    # can contain a JSON-escaped source preview, so do not reclassify its bare names.
+    if problem := _secret_problem(message, source=True, card=True):
+        return problem
+    return None
+
+
+def _mistyped(tool_name: str, args: dict) -> bool:
+    """Whether an argument is not already its schema type. The agent path coerces the arguments only
+    after this hook runs (model_tools.py:902), so the card would show another value than the one
+    that runs."""
+    types = _ARGUMENT_TYPES.get(tool_name, {})
+    return any(
+        key in types
+        and value is not None
+        and (not isinstance(value, types[key]) or (isinstance(value, bool) and bool not in types[key]))
+        for key, value in args.items()
+    )
 
 
 def _message(tool_name: str, device_name: str, details: str) -> str:
@@ -302,22 +605,38 @@ def _message(tool_name: str, device_name: str, details: str) -> str:
     )
 
 
-def _problem(message: str) -> str | None:
+def _surface_text(message: str, surface: str) -> str:
+    if surface in {"slack", "discord"}:
+        # Slack decodes only these three entities. Both dialects leave code spans literal.
+        return "`" + (html.escape(message, quote=False) if surface == "slack" else message) + "`"
+    return message
+
+
+def _problem(message: str, surface: str = "") -> str | None:
     if problem := _display_problem(message):
         return problem
-    if len(html.escape(message).encode("utf-16-le")) // 2 > _SURFACE_LIMIT:
+    if surface in {"slack", "discord"}:
+        if "`" in message:
+            return messages.WITNESS_MARKDOWN_BLOCKED
+    elif surface != "telegram" and _MARKDOWN_CONTROL.search(message):
+        return messages.WITNESS_MARKDOWN_BLOCKED
+    rendered = _surface_text(message, surface)
+    # Core escapes Telegram's HTML; the unknown-surface budget stays conservative as before.
+    measured = html.escape(rendered) if surface not in {"slack", "discord"} else rendered
+    limit = 500 if surface == "telegram" else _SURFACE_LIMIT
+    if len(measured.encode("utf-16-le")) // 2 > limit:
         return messages.WITNESS_ARGUMENTS_LONG
     return None
 
 
-def _approval(tool_name: str, device_name: str, details: str) -> dict:
+def _approval(tool_name: str, device_name: str, details: str, surface: str = "") -> dict:
     message = _message(tool_name, device_name, details)
-    if problem := _problem(message):
+    if problem := _problem(message, surface):
         return {"action": "block", "message": problem}
     return {
         "action": "approve",
-        "message": message,
-        "rule_key": f"hands-witness:{secrets.token_hex(16)}",
+        "message": _surface_text(message, surface),
+        "rule_key": f"{_RULE_PREFIX}{secrets.token_hex(16)}",
     }
 
 
@@ -336,6 +655,8 @@ def _details(tool_name: str, args: dict, count: int | None = None) -> str:
         else:
             rendered = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
             parts.append(f"{key}={rendered}")
+    if tool_name == "terminal" and args.get("background") is True:
+        parts.append("A background command has no time limit; press S to stop it.")
     return "; ".join(parts) or "no arguments"
 
 
@@ -354,22 +675,23 @@ def _too_long(tool_name: str, args: dict) -> str:
     return f"{refusal} {messages.WITNESS_SHORTER_PATH}" if argument == "path" else refusal
 
 
-def _render(tool_name: str, device_name: str, args: dict) -> dict:
+def _render(tool_name: str, device_name: str, args: dict, surface: str = "") -> dict:
     content = args.get("content")
     if tool_name != "write_file" or not isinstance(content, str):
-        result = _approval(tool_name, device_name, _details(tool_name, args))
+        result = _approval(tool_name, device_name, _details(tool_name, args), surface)
     else:
         # A write shows its length, digest and as much of its start as fits on one line.
         count = 0
-        while count < len(content):
-            problem = _problem(_message(tool_name, device_name, _details(tool_name, args, count + 1)))
-            if problem:
+        for end in range(1, len(content) + 1):
+            problem = _problem(_message(tool_name, device_name, _details(tool_name, args, end)), surface)
+            if problem is None:
+                count = end
+            elif problem not in {messages.WITNESS_SECRET_BLOCKED, messages.WITNESS_SECRET_HIDDEN}:
                 break
-            count += 1
         if count < min(len(content), _PREVIEW_MIN):
             result = {"action": "block", "message": problem}
         else:
-            result = _approval(tool_name, device_name, _details(tool_name, args, count))
+            result = _approval(tool_name, device_name, _details(tool_name, args, count), surface)
     if result["message"] == messages.WITNESS_ARGUMENTS_LONG:
         result["message"] = _too_long(tool_name, args)
     return result
@@ -410,7 +732,49 @@ def _long_option(word: str, names: tuple[str, ...]) -> bool:
 
 
 def _short_option(arguments: list[str], letters: str) -> bool:
-    return any(re.match(r"-[^-]", word) and set(word[1:]) & set(letters) for word in arguments)
+    end = arguments.index("--") if "--" in arguments else len(arguments)
+    return any(re.match(r"-[^-]", word) and set(word[1:]) & set(letters) for word in arguments[:end])
+
+
+def _carrier_options(arguments: list[str], short_values: str, long_values: tuple[str, ...], *, short_flags: str | None = None) -> list[str]:
+    options = []
+    words = iter(arguments)
+    for word in words:
+        if word == "--":
+            break
+        if not word.startswith("-"):
+            continue
+        options.append(word)
+        if word.startswith("--"):
+            if "=" not in word and _long_option(word, long_values):
+                next(words, "")
+        else:
+            for index, letter in enumerate(word[1:], 2):
+                if short_flags is not None and letter not in short_flags + short_values:
+                    options[-1] = word[:index - 1]
+                    break
+                if letter in short_values:
+                    options[-1] = word[:index]
+                    if index == len(word):
+                        next(words, "")
+                    break
+    return options
+
+
+def _container_runs_program(arguments: list[str]) -> bool:
+    words = iter(arguments)
+    for word in words:
+        if word == "--":
+            word = next(words, "")
+        elif word in {"--config", "--context", "--host", "--log-level", "--connection", "--url", "--root", "--runroot", "-c", "-H", "-l"}:
+            next(words, "")
+            continue
+        elif word.startswith("-"):
+            continue
+        if word == "container":
+            word = next(words, "")
+        return word in {"exec", "run"}
+    return False
 
 
 def _sed_field(script: str, start: int) -> int:
@@ -524,9 +888,201 @@ def _inner_lines(executable: str, words: list[str]):
     for index, word in enumerate(words):
         if executable == "find" and word.casefold() in _FIND_RUNS:
             yield words[index + 1 :]
-        for value in _values(word):
-            if any(char.isspace() for char in value):
-                yield from (split for split in _split(value) if split)
+        # make variable values can become recipe commands, including nested assignments.
+        # Ordinary message, pattern and path arguments carry data, even with whitespace.
+        if executable == "make" or (not executable and _ASSIGNMENT.match(word)):
+            if "=" in word:
+                for value in _values(word):
+                    if any(char.isspace() for char in value):
+                        yield from (split for split in _split(value) if split)
+
+
+# Shipped commands from Git 2.54 help -a and --list-cmds=builtins, excluding external commands.
+_GIT_SUBCOMMANDS = frozenset("""
+add am annotate apply archimport archive backfill bisect blame branch bugreport bundle cat-file
+check-attr check-ignore check-mailmap check-ref-format checkout checkout--worker checkout-index
+cherry cherry-pick citool clean clone column commit commit-graph commit-tree config count-objects
+credential credential-cache credential-cache--daemon credential-store cvsexportcommit cvsimport
+cvsserver daemon describe diagnose diff diff-files diff-index diff-pairs diff-tree difftool
+fast-export fast-import fetch fetch-pack filter-branch fmt-merge-msg for-each-ref for-each-repo
+format-patch fsck fsck-objects fsmonitor--daemon gc get-tar-commit-id gitk gitweb grep gui
+hash-object help history hook http-backend imap-send index-pack init init-db instaweb
+interpret-trailers last-modified log ls-files ls-remote ls-tree mailinfo mailsplit maintenance
+merge merge-base merge-file merge-index merge-one-file merge-ours merge-recursive
+merge-recursive-ours merge-recursive-theirs merge-subtree merge-tree mergetool mktag mktree
+multi-pack-index mv name-rev notes p4 pack-objects pack-redundant pack-refs patch-id pickaxe
+prune prune-packed pull push quiltimport range-diff read-tree rebase receive-pack reflog refs
+remote remote-ext remote-fd repack replace replay repo request-pull rerere reset restore rev-list
+rev-parse revert rm scalar send-email send-pack sh-i18n sh-setup shortlog show show-branch
+show-index show-ref sparse-checkout stage stash status stripspace submodule submodule--helper
+survey svn switch symbolic-ref tag unpack-file unpack-objects update-index update-ref
+update-server-info upload-archive upload-archive--writer upload-pack var verify-commit
+verify-pack verify-tag version whatchanged worktree write-tree
+""".split())
+_GIT_PROGRAM_OPTIONS = (
+    "upload-pack", "receive-pack", "exec", "exec-path", "upload-archive", "ssh-command", "sendmail-cmd",
+)
+
+
+# Value-taking options and executable selectors from Git 2.54 command help.
+_GIT_OPTIONS = {
+    "clone": ("oubjc", ("origin", "branch", "jobs", "config", "template", "reference", "reference-if-able", "depth", "shallow-since", "shallow-exclude", "separate-git-dir", "server-option", "filter", "bundle-uri", "revision", "ref-format"), "u", ("upload-pack", "template")),
+    "init": ("b", ("initial-branch", "separate-git-dir", "object-format", "ref-format"), "", ("template",)),
+    "fetch": ("jo", ("jobs", "depth", "shallow-since", "shallow-exclude", "deepen", "refmap", "server-option", "negotiation-tip", "filter"), "", ("upload-pack",)),
+    "pull": ("sXo", ("strategy", "strategy-option", "cleanup", "depth", "shallow-since", "shallow-exclude", "deepen", "refmap", "server-option", "negotiation-tip"), "", ("upload-pack",)),
+    "ls-remote": ("o", ("sort", "server-option"), "", ("upload-pack", "exec")),
+    "fetch-pack": ("", (), "", ("upload-pack", "exec")),
+    "send-pack": ("", ("remote", "push-option"), "", ("receive-pack", "exec")),
+    "upload-pack": ("", ("timeout",), "", ()),
+    "receive-pack": ("", (), "", ()),
+    "push": ("o", ("repo", "push-option", "recurse-submodules"), "", ("receive-pack", "exec")),
+    "archive": ("o", ("output", "format", "prefix", "add-file", "add-virtual-file", "mtime", "remote"), "", ("exec",)),
+    "grep": ("efmABC", ("max-count", "context", "before-context", "after-context", "threads", "max-depth"), "O", ("open-files-in-pager",)),
+    "difftool": ("tSGlOI", ("tool", "stat-width", "stat-name-width", "stat-graph-width", "stat-count", "ws-error-highlight", "src-prefix", "dst-prefix", "line-prefix", "inter-hunk-context", "output-indicator-new", "output-indicator-old", "output-indicator-context", "ignore-matching-lines", "diff-algorithm", "anchored", "word-diff-regex", "color-moved-ws", "rotate-to", "skip-to", "find-object", "diff-filter", "max-depth", "output"), "x", ("extcmd",)),
+    "mergetool": ("t", ("tool",), "", ()),
+    "commit": ("mFCctU", ("message", "file", "template", "unified", "inter-hunk-context", "reuse-message", "reedit-message", "author", "date", "cleanup", "trailer", "fixup", "squash", "pathspec-from-file"), "", ()),
+    "log": ("SGL", ("grep", "author", "committer", "since", "until", "after", "before"), "", ()),
+    "show": ("SGL", (), "", ()),
+    "rebase": ("CsX", ("onto", "whitespace", "empty", "strategy", "strategy-option", "trailer"), "x", ("exec",)),
+    "config": ("ft", ("file", "blob", "type", "default", "comment", "value", "url"), "e", ("edit",)),
+    "send-email": ("", ("from", "to", "cc", "bcc", "subject", "reply-to", "in-reply-to", "compose-encoding", "8bit-encoding", "transfer-encoding", "envelope-sender", "smtp-server", "smtp-server-option", "smtp-server-port", "smtp-user", "smtp-pass", "smtp-encryption", "smtp-ssl-cert-path", "smtp-ssl-client-cert", "smtp-ssl-client-key", "smtp-domain", "smtp-auth", "smtp-debug", "imap-sent-folder", "batch-size", "relogin-delay", "identity", "suppress-cc", "confirm"), "", ("sendmail-cmd", "to-cmd", "cc-cmd", "header-cmd", "smtp-server")),
+}
+
+
+def _git_parts(arguments: list[str]) -> tuple[list[str], str, list[str]]:
+    index = 0
+    while index < len(arguments):
+        word = arguments[index]
+        if word == "--":
+            index += 1
+            break
+        if not word.startswith("-"):
+            break
+        index += 1
+        if word in {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--attr-source", "--shallow-file"}:
+            index += 1
+    return arguments[:index], arguments[index] if index < len(arguments) else "", arguments[index + 1:]
+
+
+def _git_command_config(config: str) -> bool:
+    name = config.partition("=")[0].casefold()
+    return (
+        name in _GIT_COMMAND_CONFIG
+        or name.startswith(("alias.", "pager.", "filter."))
+        or name.startswith("gpg.") and name.endswith(".program")
+        or name.startswith("merge.") and name.endswith(".driver")
+        or name.startswith(("diff.", "difftool.", "mergetool.")) and name.endswith((".command", ".cmd", ".textconv"))
+        or name.startswith(("difftool.", "mergetool.", "man.", "browser.")) and name.endswith((".cmd", ".path"))
+        or name.startswith(("tar.", "hook.")) and name.endswith(".command")
+        or name.startswith("credential.") and name.endswith(".helper")
+        or name.startswith("remote.") and name.endswith((".uploadpack", ".receivepack", ".vcs"))
+        or name.startswith("sendemail.") and name.endswith((".sendmailcmd", ".tocmd", ".cccmd", ".headercmd", ".smtpserver"))
+        or name.startswith("submodule.") and name.endswith(".update")
+        or name.startswith("includeif.") and name.endswith(".path")
+        or name.startswith("protocol.") and name.endswith(".allow")
+        or name.startswith("trailer.") and name.endswith((".command", ".cmd"))
+        or name.startswith("guitool.") and name.endswith(".cmd")
+    )
+
+
+def _git_runs_program(global_arguments: list[str], subcommand: str, arguments: list[str]) -> bool:
+    if subcommand and subcommand not in _GIT_SUBCOMMANDS:
+        return True
+    if subcommand in {"filter-branch", "daemon", "instaweb", "credential"} or subcommand.startswith("credential-"):
+        return True
+    if subcommand in {"bisect", "submodule"}:
+        operation = next((word for word in arguments if not word.startswith("-")), "")
+        if operation == {"bisect": "run", "submodule": "foreach"}[subcommand]:
+            return True
+    short_values, long_values, short_programs, long_programs = _GIT_OPTIONS.get("init" if subcommand == "init-db" else subcommand, ("", (), "", ()))
+    options = _carrier_options(arguments, short_values, long_values)
+    # Difftool parses its own options before forwarding unknown arguments to diff.
+    # An unknown short letter preserves the whole remaining argument, including pattern text.
+    program_options = _carrier_options(arguments, "tx", ("tool", "extcmd"), short_flags="gdy") if subcommand == "difftool" else options
+    global_options = _carrier_options(global_arguments, "Cc", ("git-dir", "work-tree", "namespace", "attr-source", "config-env", "shallow-file"))
+    # Check every invocation, even commands absent from the value table. Consumed values
+    # and arguments after -- are data; executable selectors accept abbreviated long names.
+    if _short_option(program_options, short_programs) or any(
+        word.startswith("--") and bool(word[2:].split("=", 1)[0])
+        and any(name.startswith(word[2:].split("=", 1)[0].casefold()) for name in long_programs)
+        for word in program_options
+    ) or any(
+        word.startswith("--") and bool(word[2:].split("=", 1)[0])
+        and any(name.startswith(word[2:].split("=", 1)[0].casefold()) for name in _GIT_PROGRAM_OPTIONS)
+        for word in global_options + options
+    ):
+        return True
+    if subcommand == "config":
+        words = iter(arguments)
+        operands = []
+        read_only = False
+        mutating = False
+        rename = False
+        for word in words:
+            if word == "--":
+                operands.extend(words)
+                break
+            if word == "-l" or _long_option(word, ("get", "get-all", "get-regexp", "get-urlmatch", "get-color", "get-colorbool", "list")):
+                read_only = True
+            elif _long_option(word, ("add", "replace-all", "unset", "unset-all", "rename-section", "remove-section")):
+                mutating = True
+                rename = rename or _long_option(word, ("rename-section",))
+            elif word.startswith("--"):
+                if "=" not in word and _long_option(word, long_values):
+                    next(words, "")
+            elif word.startswith("-"):
+                for index, letter in enumerate(word[1:], 2):
+                    if letter in short_values:
+                        if index == len(word):
+                            next(words, "")
+                        break
+            else:
+                operands.append(word)
+        if operands and operands[0] in {"get", "list", "set", "unset", "rename-section", "remove-section", "edit"}:
+            action = operands.pop(0)
+            if action == "edit":
+                return True
+            read_only = action in {"get", "list"}
+            mutating = action not in {"get", "list"}
+            rename = action == "rename-section"
+        if rename and len(operands) > 1 and any(
+            _git_command_config(operands[1] + "." + key)
+            for key in ("editor", "helper", "program", "driver", "textconv", "cmd", "clean", "command", "path", "uploadpack", "receivepack", "vcs", "sendmailcmd", "tocmd", "cccmd", "headercmd", "smtpserver", "update", "allow")
+            + tuple(name.rsplit(".", 1)[-1] for name in _GIT_COMMAND_CONFIG)
+        ):
+            return True
+        if (not read_only or mutating) and operands and _git_command_config(operands[0]):
+            return True
+    # Only global -c/--config-env and clone -c/--config are configuration.
+    groups = [(global_arguments, "C", ("git-dir", "work-tree", "namespace", "attr-source", "shallow-file"), True)]
+    if subcommand == "clone":
+        groups.append((arguments, short_values.replace("c", ""), tuple(name for name in long_values if name != "config"), False))
+    for group, short_values, long_values, global_options in groups:
+        words = iter(group)
+        for word in words:
+            if word == "--":
+                break
+            config = ""
+            indirect = global_options and word.startswith("--config-env")
+            if word.startswith("-c"):
+                config = word[2:] or next(words, "")
+            elif indirect or not global_options and _long_option(word, ("config",)):
+                config = word.partition("=")[2] or next(words, "")
+            elif word.startswith("--"):
+                if "=" not in word and _long_option(word, long_values):
+                    next(words, "")
+            elif word.startswith("-"):
+                for index, letter in enumerate(word[1:], 2):
+                    if letter == "c":
+                        config = word[index:] or next(words, "")
+                        break
+                    if letter in short_values:
+                        if index == len(word):
+                            next(words, "")
+                        break
+            if _git_command_config(config):
+                return True
+    return False
 
 
 def _runs_program(words: list[str], depth: int) -> bool:
@@ -535,9 +1091,25 @@ def _runs_program(words: list[str], depth: int) -> bool:
     assignments, words = _command_words(words)
     executable = _program(words[0]) if words else ""
     arguments = words[1:]
+    git_global, git_command, git_arguments = _git_parts(arguments) if executable == "git" else ([], "", [])
+    rsync_options = _carrier_options(arguments, "fBMT", (
+        "exclude", "include", "exclude-from", "include-from", "filter", "files-from", "password-file",
+        "log-file", "out-format", "chmod", "chown", "usermap", "groupmap", "bwlimit", "timeout",
+        "contimeout", "max-size", "min-size", "max-delete", "backup-dir", "suffix", "temp-dir",
+        "compare-dest", "copy-dest", "link-dest", "partial-dir", "address", "port", "sockopts", "block-size",
+    )) if executable == "rsync" else []
     if (
         # Judged as written: in a quoted path such as 'Start Menu' or 'Source Code' the first word is a folder.
         (depth and words and _launcher(words[0].casefold().rstrip(" .").removesuffix(".exe")))
+        or any(word.split("=", 1)[0].rstrip("+").upper() in _COMMAND_ENV for word in assignments)
+        or executable == "ssh"
+        or (executable == "git" and _git_runs_program(git_global, git_command, git_arguments))
+        or (
+            executable == "rsync"
+            and (_short_option(rsync_options, "e") or any(_long_option(word, ("rsh", "rsync-path")) for word in rsync_options))
+        )
+        or (executable == "scp" and _short_option(arguments, "SDFo"))
+        or (executable in {"docker", "podman"} and _container_runs_program(arguments))
         or (executable in {"sed", "gsed"} and not _sed_prints(arguments))
         or (executable == "rg" and any(word == "--pre" or word.startswith(("--pre=", "--pre-glob")) for word in arguments))
         or (
@@ -546,16 +1118,6 @@ def _runs_program(words: list[str], depth: int) -> bool:
                 _short_option(arguments, "cSsu")
                 or any(word.startswith("+") or _long_option(word, ("cmd",)) for word in arguments)
             )
-        )
-        or (
-            executable == "git"
-            and "grep" in arguments
-            and (_short_option(arguments, "O") or any(_long_option(word, ("open-files-in-pager",)) for word in arguments))
-        )
-        or (
-            executable == "git"
-            and "difftool" in arguments
-            and (_short_option(arguments, "x") or any(_long_option(word, ("extcmd",)) for word in arguments))
         )
         or (
             executable == "tar"
@@ -597,13 +1159,17 @@ def _command_decision(command: str) -> dict:
     first = words[0]
     executable = _program(first)
     tokens = [token for word in argv for token in word.split()]
+    git_command = _git_parts(words[1:])[1] if executable == "git" else ""
+    if git_command and git_command not in _GIT_SUBCOMMANDS:
+        return {"action": "block", "message": messages.WITNESS_COMMAND_BLOCKED + " unknown git subcommand, may be an alias"}
+    git_grep = git_command == "grep"
     if (
         "/" in first
         or "\\" in first
         or _launcher(executable)
         or executable in _STATE_BUILTINS
         or any("powershell" in token.casefold() or "pwsh" in token.casefold() for token in tokens)
-        or any(_encoded_flag(token) for token in tokens)
+        or any(_encoded_flag(token) and not (git_grep and token == "-e") for token in tokens)
         or _runs_program(argv, 0)
     ):
         return blocked
@@ -765,40 +1331,8 @@ def _persistent_words(words: list[str], depth: int) -> bool:
     return bool(lines) and (depth == 2 or any(_persistent_words(line, depth + 1) for line in lines))
 
 
-def _approval_bypassed() -> bool:
-    from tools import approval
-
-    session_key = approval.get_current_session_key(default="")
-    # _run_approval_gate lets the first unattended context decide (tools/approval.py:1086-1101),
-    # and its approve mode answers the prompt with nobody present.
-    unattended = approval._unattended_contexts()
-    return (
-        approval.is_approval_bypass_active_for_session(session_key)
-        or approval._yolo_active()
-        or (bool(unattended) and unattended[0].mode() == "approve")
-    )
-
-
-def _other_hooks(ctx) -> bool:
-    from . import client
-
-    manager = getattr(ctx, "_manager", None)
-    if manager is None:
-        return False
-    # Hermes reads the callback lists on every call. Another pre_tool_call hook may return
-    # modify after our approval text is built (plugins.py:1937-1958), and other tool_execution
-    # middleware may rewrite arguments around this hook (agent/tool_executor.py).
-    # Our own middleware only carries the hook decision into the call (client.py).
-    return any(
-        callback is not client.tool_execution for callback in tuple(manager._middleware.get("tool_execution", ()))
-    ) or any(
-        not (isinstance(callback, partial) and callback.func is pre_tool_call and callback.args == (ctx,))
-        for callback in tuple(manager._hooks.get("pre_tool_call", ()))
-    )
-
-
 def pre_tool_call(ctx, tool_name: str, args: dict, **kwargs):
-    from . import client
+    from . import client, environment
 
     try:
         device = _selected_device(ctx)
@@ -812,15 +1346,22 @@ def pre_tool_call(ctx, tool_name: str, args: dict, **kwargs):
             return None
         if tool_name in _BLOCKED_TOOLS or tool_name not in _APPROVE_TOOLS:
             return {"action": "block", "message": messages.WITNESS_TOOL_BLOCKED}
-        if _approval_bypassed():
-            return {"action": "block", "message": messages.WITNESS_APPROVAL_DISABLED}
-        if _other_hooks(ctx):
-            return {"action": "block", "message": messages.WITNESS_HOOKS_BLOCKED}
         if not isinstance(args, dict):
             return {"action": "block", "message": messages.WITNESS_ARGUMENTS_BLOCKED}
-        args = _coerced(tool_name, args)
-        if not isinstance(args, dict):
-            return {"action": "block", "message": messages.WITNESS_ARGUMENTS_BLOCKED}
+        args = copy.deepcopy(args)
+        if tool_name == "terminal" and args.get("background") is True and "timeout" in args:
+            return {"action": "block", "message": "a background command has no time limit: leave out timeout; press S to stop it"}
+        if tool_name == "terminal" and args.get("background") is not True and args.get("timeout") is None:
+            from hermes_cli.config import apply_terminal_config_to_env
+
+            terminal_env = apply_terminal_config_to_env(env=dict(os.environ))
+            args["timeout"] = int(terminal_env.get("TERMINAL_TIMEOUT", "180"))
+        if tool_name == "search_files":
+            path = args.get("path")
+            if path is None or (isinstance(path, str) and not path.strip()):
+                args["path"] = "."
+        if _mistyped(tool_name, args):
+            return {"action": "block", "message": messages.WITNESS_ARGUMENT_TYPES_BLOCKED}
         multiline = _CONTENT_KEYS.get(tool_name, ())
         if any(
             _hidden_characters(key) or _hidden_characters(value, "\n\r\t" if key in multiline else "")
@@ -837,6 +1378,9 @@ def pre_tool_call(ctx, tool_name: str, args: dict, **kwargs):
                 return {"action": "block", "message": messages.WITNESS_PATH_REQUIRED}
             if _autostart_path(path):
                 return {"action": "block", "message": messages.WITNESS_AUTOSTART_BLOCKED}
+            # Core anchors a relative path on one of several folders (file_tools_paths.py:131-144).
+            if environment.absolute_file_path(path) is None:
+                return {"action": "block", "message": messages.WITNESS_ABSOLUTE_PATH_REQUIRED}
         if tool_name == "terminal":
             command = args.get("command")
             if not isinstance(command, str):
@@ -847,7 +1391,35 @@ def pre_tool_call(ctx, tool_name: str, args: dict, **kwargs):
             workdir = args.get("workdir")
             if _persistent_command(command) or (isinstance(workdir, str) and _working_folder(workdir)):
                 return {"action": "block", "message": messages.WITNESS_AUTOSTART_BLOCKED}
-        return _render(tool_name, device["name"], args)
+        # Scan complete values before a write is shortened to its preview.
+        suffix = posixpath.splitext(args["path"].replace("\\", "/"))[1].casefold() if tool_name in _CONTENT_KEYS else ""
+        source = suffix in _SOURCE_SUFFIXES
+        problems = {
+            _secret_problem(text, source=source and key in multiline, slash_comments=suffix in _SLASH_COMMENT_SUFFIXES and key in multiline, unspaced=suffix not in {".sh", ".bash", ".zsh"}, spacing_hint=tool_name == "write_file" and suffix == ".py" and key == "content")
+            for key, value in args.items() for text in _strings(value)
+        }
+        problems.update(_secret_problem(text) for text in _strings(list(args)))
+        if problem := next((problem for problem in problems if problem and problem.startswith(messages.WITNESS_SECRET_HIDDEN)), None):
+            return {"action": "block", "message": problem}
+        if messages.WITNESS_SECRET_BLOCKED in problems:
+            return {"action": "block", "message": messages.WITNESS_SECRET_BLOCKED}
+        surface = ctx.session_surface() if hasattr(ctx, "session_surface") else ""
+        if tool_name != "terminal":
+            texts = list(_strings(args))
+            if (
+                surface in {"slack", "discord"} and any("`" in text for text in texts)
+                or surface not in {"slack", "discord", "telegram"}
+                and any(_MARKDOWN_CONTROL.search(text) for text in texts)
+            ):
+                return {"action": "block", "message": messages.WITNESS_MARKDOWN_BLOCKED}
+        decision = _render(tool_name, device["name"], args, surface)
+        if decision["action"] == "approve":
+            # Another plugin's modify can change the arguments after this card is built
+            # (plugins.py:1230-1238); the device runs only commands that match it (environment.py).
+            client.record_shown(
+                kwargs.get("session_id", ""), kwargs.get("tool_call_id", ""), tool_name, args, decision["rule_key"]
+            )
+        return decision
     except Exception:
         if tool_name not in _SAFE_TOOLS:
             return {"action": "block", "message": messages.WITNESS_TARGET_BLOCKED}

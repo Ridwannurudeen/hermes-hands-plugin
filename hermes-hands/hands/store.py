@@ -68,10 +68,6 @@ CREATE TABLE IF NOT EXISTS session_targets (
     target TEXT NOT NULL,
     owner TEXT NOT NULL DEFAULT ''
 );
-CREATE TABLE IF NOT EXISTS session_marks (
-    session_key TEXT PRIMARY KEY,
-    last_run TEXT
-);
 CREATE TABLE IF NOT EXISTS device_help_origins (
     device_id TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
@@ -592,22 +588,18 @@ def retry_help_request(request_id: str, lease_token: str) -> bool:
         )
 
 
-def get_last_run(session_key: str) -> str | None:
-    """The target the session's last command ran on. It outlives the terminal backend object (the
-    idle reaper, a gateway restart), so a cwd recorded on another target is never reused."""
+def release_help_request(request_id: str, lease_token: str) -> bool:
+    """Return a lease the host refused to pending and give back its attempt, so a process that
+    cannot deliver never spends one; the request still expires by age (``HELP_TTL_SECONDS``)."""
     with _db() as conn:
-        row = conn.execute(
-            "SELECT last_run FROM session_marks WHERE session_key = ?", (session_key,)
-        ).fetchone()
-    return None if row is None else row["last_run"]
-
-
-def set_last_run(session_key: str, target: str) -> None:
-    with _db() as conn:
-        conn.execute(
-            "INSERT INTO session_marks (session_key, last_run) VALUES (?, ?)"
-            " ON CONFLICT(session_key) DO UPDATE SET last_run = excluded.last_run",
-            (session_key, target),
+        return (
+            conn.execute(
+                "UPDATE help_requests SET status = 'pending', attempts = attempts - 1,"
+                " lease_token = NULL, lease_until = NULL WHERE request_id = ?"
+                " AND status = 'leased' AND lease_token = ?",
+                (request_id, lease_token),
+            ).rowcount
+            > 0
         )
 
 

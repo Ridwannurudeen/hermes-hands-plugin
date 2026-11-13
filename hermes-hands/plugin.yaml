@@ -1,7 +1,7 @@
 name: hermes-hands
 label: Hermes Hands
 kind: backend
-version: "0.2.0"
+version: "0.2.1"
 author: Ridwan Nurudeen
 homepage: https://github.com/Ridwannurudeen/hermes-hands-plugin
 description: >
@@ -11,10 +11,10 @@ description: >
   approve every tool call that reaches the device. Sessions end after 30 minutes with signed receipts.
   The device connects out over HTTPS with pinned Ed25519 keys. Offline, revoked, or unreachable
   device targets fail closed. Select it with terminal.backend: hands.
-requires_hermes: ">=0.23.0"
+requires_hermes: ">=0.23.1"
 python_dependencies: []
 provides_tools: [hands_screenshot, hands_devices, hands_checkup]
-provides_hooks: [pre_tool_call]
+provides_hooks: [pre_tool_call, post_approval_response, post_tool_call, transform_tool_result]
 provides_middleware: [tool_execution]
 requires_env: []
 config_schema:

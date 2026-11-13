@@ -224,13 +224,6 @@ def test_session_targets(hands_db):
     assert store.get_session_target("s2") == ("laptop", "local")
 
 
-def test_session_last_run(hands_db):
-    assert store.get_last_run("s1") is None
-    store.set_last_run("s1", "laptop")
-    store.set_last_run("s1", "server")
-    assert (store.get_last_run("s1"), store.get_last_run("s2")) == ("server", None)
-
-
 def test_pairing_codes_are_matched_with_compare_digest(hands_db, monkeypatch):
     codes = [store.mint_pairing_code(name) for name in ("a", "b", "c")]
     calls = []

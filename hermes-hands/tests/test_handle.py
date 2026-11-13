@@ -6,7 +6,7 @@ import pytest
 
 from hands import handle as handle_module
 from hands import messages
-from hands.handle import DEVICE_TIMEOUT_GRACE, RemoteProcessHandle
+from hands.handle import RemoteProcessHandle
 from hands.relay import UNREACHABLE
 
 client = handle_module.client
@@ -93,7 +93,7 @@ def test_write_end_closes_before_exit_is_visible(fake):
     assert wait_exit(proc) == 3
     # poll() is non-None only after the write end closed: the drain reads everything, then EOF.
     assert read_to_eof(proc, timeout=1.0).decode("utf-8") == "hello wörld\n"
-    assert relay.started == [("laptop", "echo hi", True, 30 + DEVICE_TIMEOUT_GRACE)]
+    assert relay.started == [("laptop", "echo hi", True, 30)]
     assert proc.wait() == 3
 
 
@@ -129,7 +129,7 @@ def test_stdin_goes_to_the_relay_beside_the_script(fake):
     relay = fake([{"chunks": [], "next": 0, "done": True, "returncode": 0}])
     proc = RemoteProcessHandle("laptop", "cat > f", login=False, timeout=5, stdin="sudo text\n")
     assert wait_exit(proc) == 0
-    assert relay.started == [("laptop", "cat > f", False, 5 + DEVICE_TIMEOUT_GRACE)]
+    assert relay.started == [("laptop", "cat > f", False, 5)]
     assert relay.stdin == "sudo text\n"
     assert relay.file_op is False
 

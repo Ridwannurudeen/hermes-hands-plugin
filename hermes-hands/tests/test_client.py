@@ -345,8 +345,43 @@ def test_help_poller_logs_an_error_and_keeps_ticking(monkeypatch, caplog):
     monkeypatch.setattr(client, "deliver_help_once", deliver)
     stop = StopAfterTwoTicks()
     with caplog.at_level(logging.WARNING, logger=client.__name__):
-        client._help_poller(SimpleNamespace(_manager=SimpleNamespace(has_gateway_message_injector=True)), stop)
+        client._help_poller(SimpleNamespace(), stop)
 
     assert len(attempts) == 2
     assert stop.waits == 3
     assert "hermes-hands: help poll failed" in caplog.text
+
+
+def test_help_poller_backs_off_while_injection_is_refused(monkeypatch):
+    answers = iter([False, False, False, True, False, None])
+    monkeypatch.setattr(client, "deliver_help_once", lambda _ctx: next(answers))
+
+    class Waits:
+        def __init__(self):
+            self.timeouts = []
+
+        def wait(self, timeout):
+            self.timeouts.append(timeout)
+            return len(self.timeouts) == 7
+
+    waits = Waits()
+    client._help_poller(SimpleNamespace(), waits)
+    assert waits.timeouts == [1.0, 2.0, 4.0, 8.0, 1.0, 2.0, 1.0]
+
+
+def test_a_refused_help_injection_spends_no_attempt(hands_db):
+    device = Device()
+    store.record_seen(
+        device.device_id, instance="w1", witness=True, session_state="active", capabilities=["help-v1"]
+    )
+    store.set_help_origin(device.device_id, "telegram:42", {"platform": "telegram", "chat_id": "42"}, "s1")
+    assert store.accept_help_request(device.device_id, request_id="a" * 32, instance="w1", text="help") == "accepted"
+    refusing = SimpleNamespace(inject_message=lambda *args, **kwargs: False)
+    for _ in range(store.HELP_MAX_ATTEMPTS + 2):
+        assert client.deliver_help_once(refusing) is False
+    pending = store.get_help_request(device.device_id, "a" * 32)
+    assert pending["status"] == "pending" and pending["attempts"] == 0
+    accepting = SimpleNamespace(inject_message=lambda *args, **kwargs: True)
+    assert client.deliver_help_once(accepting) is True
+    assert store.get_help_request(device.device_id, "a" * 32)["attempts"] == 1
+    assert client.deliver_help_once(accepting) is None

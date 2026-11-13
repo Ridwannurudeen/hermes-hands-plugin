@@ -19,6 +19,7 @@ def fresh_bindings(monkeypatch):
     )
     monkeypatch.setattr(client, "_RUNNING_CALLS", {}, raising=False)
     monkeypatch.setattr(client, "_CALL_SESSIONS", {})
+    monkeypatch.setattr(client, "_APPROVED_CALLS", {})
 
 
 class _Guard:
@@ -49,6 +50,7 @@ def test_agent_loop_executor_runs_the_hook_inside_the_middleware_and_queues_the_
     from agent import tool_executor
     from gateway.session_context import scoped_session_key
     import tools.approval as approval
+    from tools.approval_context import _fire_approval_hook
 
     from hands import environment, witness
 
@@ -62,16 +64,20 @@ def test_agent_loop_executor_runs_the_hook_inside_the_middleware_and_queues_the_
         capabilities=["witness-v1", "checkup-v1"] if active else ["checkup-v1"],
     )
     monkeypatch.setattr(environment, "resolve_current_target", lambda _ctx: "laptop")
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
-    monkeypatch.setattr(witness, "_other_hooks", lambda _ctx: False)
     asked = []
-    monkeypatch.setattr(
-        approval, "request_tool_approval", lambda *a, **k: asked.append(a) or {"approved": True}
-    )
+
+    def human_yes(*args, rule_key, **kwargs):
+        # The person's answer, reported the way core's prompt reports it (tools/approval.py).
+        asked.append(args)
+        _fire_approval_hook("post_approval_response", choice="once", pattern_key=f"plugin_rule:{rule_key}")
+        return {"approved": True}
+
+    monkeypatch.setattr(approval, "request_tool_approval", human_yes)
     ctx = SimpleNamespace(current_cron_execution=lambda: None)
     manager = plugins.PluginManager(scope_key="r3b1-agent-loop")
     manager._middleware["tool_execution"] = [client.tool_execution]
     manager._hooks["pre_tool_call"] = [partial(witness.pre_tool_call, ctx)]
+    manager._hooks["post_approval_response"] = [witness.post_approval_response]
     monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
     seen = []
 
@@ -105,7 +111,7 @@ def test_agent_loop_executor_runs_the_hook_inside_the_middleware_and_queues_the_
     ]
     assert len(hub._jobs) == 1, managed.result
     assert bool(asked) == active
-    assert client._CALL_SESSIONS == {}
+    assert client._CALL_SESSIONS == {} and client._APPROVED_CALLS == {}
     assert client._decision_fields() == {}
 
 

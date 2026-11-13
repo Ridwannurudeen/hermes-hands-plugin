@@ -15,6 +15,7 @@ def fresh_bindings(monkeypatch):
     monkeypatch.setattr(client, "_RUNNING_CALLS", {})
     monkeypatch.setattr(client, "_RUNNING_COUNTS", {})
     monkeypatch.setattr(client, "_CALL_SESSIONS", {})
+    monkeypatch.setattr(client, "_APPROVED_CALLS", {})
 
 
 NORMAL = {"device_id": "d1", "witness": False, "session_state": "normal", "instance": None}
@@ -37,6 +38,8 @@ def test_a_context_copied_in_the_body_keeps_the_decision_after_the_call_ends():
 
     def body(_args):
         client.bind_tool_session(WITNESS, session_id="s1", tool_call_id="c1")
+        client.record_shown("s1", "c1", "terminal", {}, "hands-witness:r5d")
+        client.record_approval("s1", "c1", "hands-witness:r5d")
         copies.append(contextvars.copy_context())
 
     client.tool_execution(args={}, next_call=body, session_id="s1", tool_call_id="c1")

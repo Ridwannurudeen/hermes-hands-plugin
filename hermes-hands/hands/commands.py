@@ -273,13 +273,19 @@ def _help_origin(platform: str, source) -> dict | None:
 
 
 def terminal_backend() -> str:
-    """The terminal backend Hermes resolves for this profile: config.yaml terminal.backend, else
-    TERMINAL_ENV from the profile .env or this process's environment (terminal_scope.py:114)."""
+    """The terminal backend Hermes resolves for this profile: config.yaml terminal.backend as written,
+    else TERMINAL_ENV from this process's environment, else from the profile .env, else local
+    (terminal_scope.py:114-130). A managed-scope pin is not seen; the answer only words /hands use
+    and doctor."""
+    from agent.secret_scope import load_env_file
+    from hermes_cli.config import read_raw_config_readonly
     from hermes_constants import get_hermes_home
-    from tools.terminal_scope import build_profile_terminal_scope
 
-    launch = {key: value for key, value in os.environ.items() if key.startswith("TERMINAL_")}
-    return build_profile_terminal_scope(get_hermes_home(), env_overlay=launch).get("TERMINAL_ENV", "")
+    terminal = read_raw_config_readonly().get("terminal")
+    if isinstance(terminal, dict) and terminal.get("backend") is not None:
+        return str(terminal["backend"])
+    profile = load_env_file(get_hermes_home() / ".env")
+    return os.environ.get("TERMINAL_ENV", profile.get("TERMINAL_ENV", "local"))
 
 
 def _is_owner(ctx, platform: str, source) -> bool:
@@ -396,12 +402,24 @@ def register_commands(ctx, *, has_seed: bool) -> None:
             if not session_key:
                 return "Hands: no session key is available."
             owner = _caller(platform, source)
+            if targets.has_run(session_id) or targets.is_pending(session_id):
+                current = targets.target_for(
+                    session_key=session_key,
+                    caller=owner,
+                    default_target=str(ctx.get_config("default_target", default=targets.SERVER)),
+                )
+                if name != current:
+                    if not targets.has_run(session_id):
+                        return "Hands: a machine tool call is still in progress. Wait for it to finish, then try /hands use again."
+                    return (
+                        f"Hands: this conversation already ran commands on {current}. "
+                        f"Start a new conversation with /new, then /hands use {name}."
+                    )
             store.set_session_target(session_key, name, owner=owner)
             if name != "server":
                 origin = _help_origin(platform, source)
                 if origin is not None:
                     store.set_help_origin(device["device_id"], owner, origin, session_key)
-            targets.notify_target_changed(session_key)
             return f"Target set to {name}; it applies from the next command."
         if action == "revoke":
             answer = ctx.ask_choice(f"Revoke {name}?", [{"value": "yes", "label": "Yes"}, {"value": "no", "label": "No"}])

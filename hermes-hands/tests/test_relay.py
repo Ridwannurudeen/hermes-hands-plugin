@@ -16,7 +16,8 @@ PEER = "203.0.113.7"
 
 @pytest.fixture
 def hub(hands_db, monkeypatch):
-    monkeypatch.setattr(relay, "_help_context", SimpleNamespace(_gateway_injection_allowed=lambda: True))
+    monkeypatch.setattr(relay, "_help_context", SimpleNamespace())
+    monkeypatch.setattr(relay, "_help_enabled", lambda: True)
     return relay.Relay(relay.derive_keys(SEED))
 
 

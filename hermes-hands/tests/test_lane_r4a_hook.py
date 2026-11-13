@@ -87,7 +87,7 @@ def test_ordinary_paths_that_only_share_a_name_still_reach_the_helper(hook, comm
         "/c/Users/x/projects/cron/notes.txt",
         "/c/Users/x/profile",
         "~/Documents/Profile/notes.txt",
-        "src/startup/main.py",
+        "/home/x/src/startup/main.py",
     ],
 )
 def test_ordinary_writes_that_only_share_a_name_still_reach_the_helper(hook, path):

@@ -29,20 +29,6 @@ def test_session_end_codes_read_as_plain_sentences(error, sentence):
     assert messages.device_result_error(error, "laptop") == sentence
 
 
-def test_the_other_hooks_refusal_names_every_source_and_its_remedy():
-    text = messages.WITNESS_HOOKS_BLOCKED
-    for words in (
-        "another tool is watching tool calls",
-        "restart Hermes",
-        "hermes plugins disable <name>",
-        'hermes hooks revoke "<command>"',
-        "remove pre_tool_call from its events",
-        "hermes hooks list",
-        "hermes plugins list",
-    ):
-        assert words in text, words
-    assert not set(text) & set("–—‘’“”")
-
 
 def _handlers(monkeypatch, tmp_path):
     import importlib

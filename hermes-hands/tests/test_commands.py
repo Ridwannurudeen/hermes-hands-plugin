@@ -1,3 +1,4 @@
+import os
 import shlex
 import sys
 import types
@@ -203,6 +204,45 @@ def test_use_refuses_a_device_unless_the_backend_is_hands(monkeypatch):
     assert targets == ["server", "laptop"]
 
 
+@pytest.mark.parametrize("other", ["server", "desk"])
+def test_use_switches_freely_until_the_conversation_runs_a_command(monkeypatch, other):
+    """Core keeps what it learned about the machine that answered for the conversation, so once a
+    command ran, another target waits for /new, which starts a new session id."""
+    ctx = setup(monkeypatch, ["telegram:42"])
+    monkeypatch.setattr(commands, "terminal_backend", lambda: "hands")
+    monkeypatch.setattr(commands.store, "get_device", lambda name: {"name": name})
+    bound = {}
+    monkeypatch.setattr(
+        commands.store, "set_session_target", lambda key, name, owner: bound.__setitem__(key, (name, owner))
+    )
+    monkeypatch.setattr(commands.store, "get_session_target", lambda key: bound.get(key))
+    monkeypatch.setattr(commands.targets, "_RAN", set())
+
+    def use(name, session_id):
+        return ctx.handler(
+            f"use {name}", session_id=session_id, session_key="d", platform="telegram", source=Source()
+        )
+
+    assert use("laptop", "c1").startswith("Target set to laptop")
+    assert use("server", "c1").startswith("Target set to server")  # nothing ran yet
+    assert use("laptop", "c1").startswith("Target set to laptop")
+    commands.targets.mark_ran("c1")
+    assert use(other, "c1") == (
+        "Hands: this conversation already ran commands on laptop. "
+        f"Start a new conversation with /new, then /hands use {other}."
+    )
+    assert bound["d"] == ("laptop", "telegram:42")
+    assert use("laptop", "c1").startswith("Target set to laptop")  # the same target is no switch
+    assert use(other, "c2").startswith(f"Target set to {other}")  # after /new
+    assert bound["d"] == (other, "telegram:42")
+    assert commands.targets.has_run("c1") and not commands.targets.has_run("c2")
+    commands.targets.mark_ran("c2")
+    assert use("laptop", "c2") == (
+        f"Hands: this conversation already ran commands on {other}. "
+        "Start a new conversation with /new, then /hands use laptop."
+    )
+
+
 def test_use_refuses_unknown_device(monkeypatch):
     ctx = setup(monkeypatch, ["telegram:42"])
     monkeypatch.setattr(commands, "terminal_backend", lambda: "hands")
@@ -275,16 +315,28 @@ def test_the_backend_is_read_the_way_hermes_resolves_it(monkeypatch, tmp_path):
     """V49: config.yaml terminal.backend wins; without it TERMINAL_ENV (the .env or the launch
     environment) selects the backend, as core's terminal_scope does."""
     pytest.importorskip("tools.terminal_scope")
+    from tools.terminal_scope import build_profile_terminal_scope
+
+    def core():
+        launch = {key: value for key, value in os.environ.items() if key.startswith("TERMINAL_")}
+        return build_profile_terminal_scope(tmp_path, env_overlay=launch)["TERMINAL_ENV"]
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    assert commands.terminal_backend() == core() == "local"
     (tmp_path / "config.yaml").write_text("model: x\n", encoding="utf-8")
     monkeypatch.setenv("TERMINAL_ENV", "hands")
-    assert commands.terminal_backend() == "hands"
+    assert commands.terminal_backend() == core() == "hands"
     monkeypatch.delenv("TERMINAL_ENV")
     (tmp_path / ".env").write_text("TERMINAL_ENV=hands\n", encoding="utf-8")
-    assert commands.terminal_backend() == "hands"
+    assert commands.terminal_backend() == core() == "hands"
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    assert commands.terminal_backend() == core() == "ssh"
     (tmp_path / "config.yaml").write_text("terminal:\n  backend: local\n", encoding="utf-8")
     monkeypatch.setenv("TERMINAL_ENV", "hands")
-    assert commands.terminal_backend() == "local"
+    assert commands.terminal_backend() == core() == "local"
+    (tmp_path / "config.yaml").write_text("terminal:\n  cwd: /srv\n", encoding="utf-8")
+    assert commands.terminal_backend() == core() == "hands"
 
 
 def test_use_binds_the_target_to_the_person_who_sent_it(monkeypatch):

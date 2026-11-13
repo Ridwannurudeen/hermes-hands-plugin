@@ -128,7 +128,7 @@ def test_manifest_advertises_the_checkup_tool():
 
     manifest = yaml.safe_load((PLUGIN_DIR / "plugin.yaml").read_text(encoding="utf-8-sig"))
 
-    assert manifest["version"] == "0.2.0"
+    assert manifest["version"] == "0.2.1"
     assert {"hands_screenshot", "hands_devices", "hands_checkup"} <= set(
         manifest["provides_tools"]
     )

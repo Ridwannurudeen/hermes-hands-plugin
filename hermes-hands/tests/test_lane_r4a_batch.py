@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hands import client, store
+from hands import client, store, targets
 from hands_fakes import Device, hands_db, wired  # noqa: F401
 
 
@@ -18,6 +18,9 @@ def fresh_bindings(monkeypatch):
     monkeypatch.setattr(client, "_CALL_CELL", contextvars.ContextVar("r4a_call_cell", default=None))
     monkeypatch.setattr(client, "_RUNNING_CALLS", {})
     monkeypatch.setattr(client, "_CALL_SESSIONS", {})
+    monkeypatch.setattr(client, "_APPROVED_CALLS", {})
+    monkeypatch.setattr(client, "_CLAIMED_CALLS", set())
+    monkeypatch.setattr(targets, "_RAN", set())
 
 
 class _Guard:
@@ -54,30 +57,39 @@ def _call(call_id, command):
     return SimpleNamespace(
         id=call_id,
         type="function",
-        function=SimpleNamespace(name="terminal", arguments=json.dumps({"command": command})),
+        function=SimpleNamespace(name="terminal", arguments=json.dumps({"command": command, "timeout": 5})),
     )
 
 
 @pytest.mark.parametrize(
-    ("active", "denied"),
-    [(False, False), (True, False), (True, True)],
-    ids=["normal", "active_witness", "active_witness_denied"],
+    ("active", "denied", "commands", "ran"),
+    [
+        (False, False, ["echo one", "echo two"], None),
+        (True, False, ["echo one", "echo two"], None),
+        (True, False, ["echo same", "echo same"], None),
+        (True, False, ["echo one", "echo two"], "echo other"),
+        (True, True, ["echo one", "echo two"], None),
+    ],
+    ids=["normal", "active_witness", "active_witness_identical", "active_witness_changed", "active_witness_denied"],
 )
 def test_desktop_terminal_batch_carries_each_hook_decision_to_its_job(
-    wired, monkeypatch, active, denied
+    wired, monkeypatch, active, denied, commands, ran
 ):
     """Hermes Desktop prepares adjacent terminal calls in a batch (agent/terminal_approval_batch.py):
     bind_prepared_dispatch snapshots the context before the tool_execution middleware runs, so the
-    tool body never sees the middleware's call cell. Each job must still carry its own decision."""
+    tool body never sees the middleware's call cell, and every call of the batch is running while
+    one body runs. A witness body claims the approved call whose shown arguments match what it runs,
+    through the real HandsEnvironment.execute check, so each approval runs once; a body that runs a command no
+    approved call showed is refused."""
     plugins = pytest.importorskip("hermes_cli.plugins")
     from agent import terminal_approval_batch, tool_executor
     from gateway import session_context
     from gateway.session_context import set_session_vars
     import model_tools
     import tools.approval as approval
-    from tools.approval_context import set_current_session_key
+    from tools.approval_context import _fire_approval_hook, set_current_session_key
 
-    from hands import environment, witness
+    from hands import environment, messages, witness
 
     hub, _ = wired
     device = Device()
@@ -89,57 +101,56 @@ def test_desktop_terminal_batch_carries_each_hook_decision_to_its_job(
         capabilities=["witness-v1", "checkup-v1"] if active else ["checkup-v1"],
     )
     monkeypatch.setattr(environment, "resolve_current_target", lambda _ctx: "laptop")
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     asked = []
-    monkeypatch.setattr(
-        approval,
-        "request_tool_approval",
-        lambda *a, **k: (
-            asked.append(a)
-            or (
-                {"approved": False, "message": "The helper said no."}
-                if denied
-                else {"approved": True}
-            )
-        ),
-    )
+
+    def answer(*args, rule_key, **kwargs):
+        asked.append(args)
+        choice = "deny" if denied else "once"
+        _fire_approval_hook("post_approval_response", choice=choice, pattern_key=f"plugin_rule:{rule_key}")
+        return {"approved": False, "message": "The helper said no."} if denied else {"approved": True}
+
+    monkeypatch.setattr(approval, "request_tool_approval", answer)
     ctx = SimpleNamespace(current_cron_execution=lambda: None)
     manager = plugins.PluginManager(scope_key="r4a-desktop-batch")
     manager._middleware["tool_execution"] = [client.tool_execution]
     manager._hooks["pre_tool_call"] = [partial(witness.pre_tool_call, ctx)]
-    ctx._manager = manager  # the real _other_hooks check
+    manager._hooks["post_approval_response"] = [client.post_approval_response, witness.post_approval_response]
+    manager._hooks["post_tool_call"] = [client.post_tool_call]
     monkeypatch.setattr(plugins, "_delivery_manager", lambda: manager)
 
-    seen, queued = [], []
+    from test_environment import Ctx, FakeHandle
+
+    env = environment.HandsEnvironment(Ctx(), cwd="~", timeout=5)
+    seen, queued, sent = [], [], []
+    post = client._post
+
+    def observe(route, body, **kwargs):
+        if route == "/local/exec":
+            sent.append(body.get("decision"))
+        return post(route, body, **kwargs)
+
+    monkeypatch.setattr(client, "_post", observe)
     original_dispatch = model_tools.registry.dispatch
+
+    def run_bash(sub, script, *, login=False, timeout=120, stdin_data=None):
+        job = client.start_job("laptop", script=script, login=login, timeout=timeout, stdin=stdin_data)
+        queued.append({"job": job})
+        return FakeHandle("laptop", script, login=login, timeout=timeout, stdin=stdin_data)
+
+    monkeypatch.setattr(environment.DeviceEnvironment, "_run_bash", run_bash)
 
     def dispatch(name, args, **kwargs):
         if name != "terminal":
             return original_dispatch(name, args, **kwargs)
-        seen.append(client._decision_fields())
-        # The device handle queues its job from a context copied inside the tool (hands/handle.py).
-        worker = contextvars.copy_context()
-        outcome = {}
-
-        def queue():
-            try:
-                outcome["job"] = client.start_job(
-                    "laptop", script=args["command"], login=False, timeout=5
-                )
-            except client.HandsError as exc:
-                outcome["refused"] = str(exc)
-
-        thread = threading.Thread(target=worker.run, args=(queue,))
-        thread.start()
-        thread.join(10)
-        queued.append(outcome)
-        return json.dumps({"output": json.dumps(outcome), "exit_code": 0})
+        result = env.execute(ran or args["command"], "~", timeout=5, bounded_capture=True)
+        seen.append(result["output"] if result["returncode"] else client._decision_fields())
+        return json.dumps({"output": result["output"], "exit_code": result["returncode"]})
 
     monkeypatch.setattr(model_tools.registry, "dispatch", dispatch)
     session_key = "agent:main:desktop:dm:r4a"
     approval.register_gateway_notify(session_key, lambda _data: None)
     agent = _agent()
-    calls = [_call("call-a", "echo one"), _call("call-b", "echo two")]
+    calls = [_call("call-a", commands[0]), _call("call-b", commands[1])]
     results = []
 
     def run_batch():
@@ -169,8 +180,11 @@ def test_desktop_terminal_batch_carries_each_hook_decision_to_its_job(
         approval.unregister_gateway_notify(session_key)
 
     assert len(asked) == (2 if active else 0)
-    assert client._RUNNING_CALLS == {} and client._CALL_SESSIONS == {}
+    assert client._RUNNING_CALLS == {} and client._CALL_SESSIONS == {} and client._APPROVED_CALLS == {}
+    assert client._CLAIMED_CALLS == set()
     if denied:
+        assert not targets.has_run(agent.session_id)
+        assert not targets.is_pending(agent.session_id)
         assert [result.blocked for result in results] == [True, True], [r.result for r in results]
         assert seen == [] and queued == []
         assert device.device_id not in hub._queues
@@ -182,6 +196,12 @@ def test_desktop_terminal_batch_carries_each_hook_decision_to_its_job(
         }
     }
     assert [result.blocked for result in results] == [False, False], [r.result for r in results]
+    if ran is not None:
+        assert seen == [messages.WITNESS_CALL_CHANGED] * 2
+        assert device.device_id not in hub._queues
+        return
     assert seen == [decision, decision]
-    assert [sorted(outcome) for outcome in queued] == [["job"], ["job"]], queued
-    assert [job["script"] for job in hub._queues[device.device_id]] == ["echo one", "echo two"]
+    assert queued and all(sorted(outcome) == ["job"] for outcome in queued), queued
+    jobs = hub._queues[device.device_id]
+    assert sent == [decision["decision"]] * len(queued), sent
+    assert [next(command for command in commands if f"eval '{command}" in job["script"]) for job in jobs if "eval '" in job["script"]] == commands

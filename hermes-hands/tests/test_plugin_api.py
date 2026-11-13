@@ -37,7 +37,6 @@ SEED = "9a" * 32
 def prepare_context(ctx):
     unloaders = []
     hooks = []
-    ctx._gateway_injection_allowed = lambda: True
 
     def register_hook(name, callback):
         hooks.append((name, callback))
@@ -58,6 +57,11 @@ def prepare_context(ctx):
 @pytest.fixture
 def plugin(hands_db, monkeypatch):
     monkeypatch.setenv("HANDS_RELAY_SEED", SEED)
+    monkeypatch.setenv("HERMES_HOME", str(hands_db))
+    (hands_db / "config.yaml").write_text(
+        "plugins:\n  entries:\n    hermes-hands:\n      allow_gateway_injection: true\n",
+        encoding="utf-8",
+    )
     package = load_plugin_package()
     hands_client = importlib.import_module("hermes_plugins.hermes_hands.hands.client")
     ctx = prepare_context(RegisterCtx())
@@ -104,7 +108,7 @@ def test_register_wires_everything(plugin):
     assert ("middleware", "tool_execution") in ctx.calls
     kinds = [kind for kind, _ in ctx.calls]
     assert kinds.index("hook") < kinds.index("unload")
-    assert "provides_hooks: [pre_tool_call]" in (PLUGIN_DIR / "plugin.yaml").read_text(
+    assert "provides_hooks: [pre_tool_call, post_approval_response, post_tool_call, transform_tool_result]" in (PLUGIN_DIR / "plugin.yaml").read_text(
         encoding="utf-8"
     )
     assert provider.keys == hands.relay.derive_keys(SEED)
@@ -571,8 +575,8 @@ def test_help_injection_refusal_leaves_work_pending(plugin):
     ctx.inject_message = lambda *args, **kwargs: False
     assert hands.client.deliver_help_once(ctx) is False
     pending = hands.store.get_help_request(device.device_id, "3" * 32)
-    assert pending["status"] == "pending" and pending["attempts"] == 1
-    assert pending["next_attempt_at"] > time.time()
+    assert pending["status"] == "pending" and pending["attempts"] == 0
+    assert pending["next_attempt_at"] <= time.time()
 
 
 def test_deliver_help_once_uses_real_plugin_context_without_gateway(hands_db, tmp_path):
@@ -604,13 +608,17 @@ def test_deliver_help_once_uses_real_plugin_context_without_gateway(hands_db, tm
 
     assert client.deliver_help_once(ctx) is False
     pending = store.get_help_request(device.device_id, "4" * 32)
-    assert pending["status"] == "pending" and pending["attempts"] == 1
+    assert pending["status"] == "pending" and pending["attempts"] == 0
 
 
-def test_help_poller_leases_nothing_until_a_gateway_injector_exists(hands_db, tmp_path):
+def test_help_poller_spends_no_attempt_until_a_gateway_injector_exists(hands_db, tmp_path):
     from hermes_cli.plugins import PluginContext, PluginManager
     from hermes_cli.plugins_manifest import PluginManifest
 
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  entries:\n    hermes-hands:\n      allow_gateway_injection: true\n",
+        encoding="utf-8",
+    )
     manager = PluginManager(scope_key=str(tmp_path))
     ctx = PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
     device = Device("laptop")

@@ -7,8 +7,8 @@ queues the script at the relay and long-polls its output into an OS pipe whose r
 (``base_output.py:342-477``). The write end is closed BEFORE ``poll()``/``returncode`` turn non-None;
 the drain thread stops about 300 ms after exit, and output still in flight then would be lost
 (``base.py:549-594``). There is deliberately no ``pid``: core's backstop kills ``pid`` as a host
-process tree (``base.py:785-798``). Timeouts are core's: the device gets a later deadline, so
-``poll()`` stays None past core's and core returns 124 with ``hermes_timed_out`` itself. With an
+process tree (``base.py:785-798``). The device enforces the approved execution timeout
+unchanged, independently of gateway cancellation. With an
 ``inline_limit`` (terminal-tool calls only), output past it keeps its first and last halves around a
 note naming the device's full log (PLAN-v3 §1.4 Output). Once the job is queued, losing the relay
 never reads as "nothing ran": the job is cancelled best effort and the note says it may still run.
@@ -24,7 +24,6 @@ import threading
 from . import client, messages
 from .relay import UNREACHABLE
 
-DEVICE_TIMEOUT_GRACE = 15  # seconds the device waits past core's deadline before its own 124
 # Core's cwd and exit-status marker lines end every command's output (base_session_env.py:40-79):
 # the kept tail always has room for them, however small inline_output_limit_bytes is set.
 MIN_INLINE_LIMIT = 8192
@@ -149,7 +148,7 @@ class RemoteProcessHandle:
                 device,
                 script=script,
                 login=login,
-                timeout=timeout + DEVICE_TIMEOUT_GRACE,
+                timeout=timeout,
                 stdin=stdin,
                 file_op=file_op,
             )

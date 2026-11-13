@@ -171,13 +171,9 @@ class RegisterCtx:
     def __init__(self):
         self.config = {}
         self.calls = []
-        self.gateway_injection = True  # plugins.entries.hermes-hands.allow_gateway_injection
 
     def get_config(self, key, default=None):
         return self.config.get(key, default)
-
-    def _gateway_injection_allowed(self) -> bool:
-        return self.gateway_injection
 
     def current_cron_execution(self):
         return None

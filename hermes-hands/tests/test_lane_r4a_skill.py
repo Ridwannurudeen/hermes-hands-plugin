@@ -19,7 +19,6 @@ def _normalized() -> str:
 @pytest.fixture
 def gate(monkeypatch):
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: {**DEVICE, "name": "office-pc-02"})
-    monkeypatch.setattr(witness, "_approval_bypassed", lambda: False)
     return lambda tool, args: witness.pre_tool_call(object(), tool, args)
 
 
@@ -85,6 +84,6 @@ def test_the_skill_says_a_write_shows_only_the_start_of_its_content(gate):
     assert "the first characters of the content" in text
     assert "tell the helper what the rest of the file contains" in text
     content = "line one of the note\n" * 40
-    card = gate("write_file", {"path": "~/Docs/notes.txt", "content": content})
+    card = gate("write_file", {"path": "/home/sam/notes.txt", "content": content})
     assert card["action"] == "approve"
     assert content not in card["message"] and f"length={len(content)}" in card["message"]

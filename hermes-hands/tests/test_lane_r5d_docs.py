@@ -56,8 +56,10 @@ def test_the_readme_describes_what_the_persistence_block_covers():
 
 def test_the_readme_limits_name_the_persistence_routes_that_only_reach_approval():
     limits = README.split("## Known limits", 1)[1].split("\n## ", 1)[0]
-    for words in ("`AutoRun`", "`at`", "`launchctl load`", "`systemd-run`", "`sc create`", "symlink", "recursive extract"):
+    for words in ("`AutoRun`", "`at`", "`launchctl load`", "`sc create`", "symlink", "recursive extract"):
         assert words in limits, words
+    assert "`systemd-run`" not in limits
+    assert witness._command_decision("systemd-run service") == {"action": "block", "message": witness.messages.WITNESS_COMMAND_BLOCKED}
 
 
 def test_the_skill_says_a_bare_startup_name_is_a_search_term_and_names_the_refused_folders():

@@ -79,6 +79,20 @@ def configure_help(ctx) -> None:
     _help_context = ctx
 
 
+def _help_enabled() -> bool:
+    """``plugins.entries.hermes-hands.allow_gateway_injection: true``, read as core reads it for
+    ``ctx.inject_message`` (plugins.py:624-632)."""
+    from hermes_cli.config import load_config_readonly
+
+    try:
+        entry = load_config_readonly()
+    except Exception:
+        return False
+    for key in ("plugins", "entries", "hermes-hands"):
+        entry = entry.get(key) if isinstance(entry, dict) else None
+    return isinstance(entry, dict) and entry.get("allow_gateway_injection") is True
+
+
 @dataclass(frozen=True)
 class Keys:
     """Everything derived from ``HANDS_RELAY_SEED``: the relay's Ed25519 key pair and the local bearer."""
@@ -735,7 +749,7 @@ class Relay:
             )
 
         # The dashboard shares this outbox with the gateway, so its own missing injector is normal.
-        if _help_context is None or not await asyncio.to_thread(_help_context._gateway_injection_allowed):
+        if _help_context is None or not await asyncio.to_thread(_help_enabled):
             return self._signed(
                 409,
                 {"error": "help_disabled", "detail": "hands: the helper has not enabled device messages."},
