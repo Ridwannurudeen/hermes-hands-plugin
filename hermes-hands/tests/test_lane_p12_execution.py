@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("tools.environments.base")
 
 from hands import environment, messages, store  # noqa: E402
-from hands_fakes import hands_db, wired  # noqa: E402,F401
+from hands_fakes import device_bindir, hands_db, wired  # noqa: E402,F401
 from test_environment import (  # noqa: E402,F401
     fresh_session_cwds,
     hands_backend,
@@ -112,7 +112,7 @@ def test_mapped_drive_writes_keep_the_approved_destination(dispatch, name):
 
 
 @pytest.mark.parametrize("windows", [False, True], ids=["posix", "windows"])
-def test_unchanged_utf16_read_keeps_the_approved_page(dispatch, monkeypatch, windows):
+def test_unchanged_utf16_read_keeps_the_approved_page(dispatch, device_bindir, monkeypatch, windows):
     d = dispatch
     monkeypatch.setenv("PATH", os.pathsep.join((str(Path(sys.executable).parent), os.environ["PATH"])))
     device = store.get_device("laptop")

@@ -9,6 +9,8 @@ import base64
 import functools
 import importlib.util
 import json
+import os
+import shutil
 import sqlite3
 import sys
 import threading
@@ -30,6 +32,28 @@ _LOCAL_ROUTES = {
     "/local/cancel": "local_cancel",
     "/local/state": "local_state",
 }
+
+
+@pytest.fixture
+def device_bindir(tmp_path, monkeypatch):
+    bindir = tmp_path / "device-bin"
+    bindir.mkdir()
+    if os.name != "nt" and shutil.which("cygpath") is None:
+        # Adapt paths already on the host (such as /tmp pytest dirs or POSIX paths);
+        # this fixture adapter does not emulate Windows drive-letter mapping.
+        cygpath = bindir / "cygpath"
+        cygpath.write_text(
+            '#!/bin/sh\n'
+            'if [ "$#" -ne 2 ] || [ "$1" != "-m" ]; then\n'
+            "    echo 'fixture cygpath expects exactly: -m <one path>' >&2\n"
+            '    exit 2\n'
+            'fi\n'
+            'printf \'%s\\n\' "$2" | tr \'\\\\\' \'/\'\n',
+            encoding="utf-8",
+        )
+        cygpath.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    return bindir
 
 
 @pytest.fixture

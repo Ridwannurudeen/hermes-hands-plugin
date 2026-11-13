@@ -43,6 +43,9 @@ def core(laptop, hands_backend, monkeypatch):
     """Core's own tools on the paired laptop, with the shown arguments a witness card would keep."""
     from tools import file_tools, terminal_tool
 
+    # The fake device folder is on the gateway filesystem, so core sees its files.
+    # Disable its host-path guard here only to test Hands; production path collisions can also trip it.
+    monkeypatch.setenv("HERMES_DISABLE_FILE_STATE_GUARD", "1")
     hub, device, home = laptop
     monkeypatch.setenv("TERMINAL_ENV", "hands")
     hands_backend._ctx.config["default_target"] = "laptop"

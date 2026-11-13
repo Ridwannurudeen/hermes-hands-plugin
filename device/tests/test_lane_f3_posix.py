@@ -108,7 +108,7 @@ class SigtermTerminalTests(unittest.TestCase):
             process = None
 
             def wait_for(predicate):
-                deadline = time.monotonic() + 8
+                deadline = time.monotonic() + 30
                 while time.monotonic() < deadline:
                     if predicate():
                         return

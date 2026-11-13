@@ -287,31 +287,60 @@ def test_compiled_in_checkup_round_trips_through_the_selected_device(rig):
     assert set(job) == {"job_id", "type"}
 
 
-def test_timeout_and_cancel_stop_the_work_on_the_device(rig):
+def test_timeout_and_cancel_stop_the_work_on_the_device(rig, monkeypatch):
     env = rig.environment()
     assert env.execute("true")["returncode"] == 0
 
-    timed_out = {}
-    worker = threading.Thread(target=lambda: timed_out.update(env.execute("sleep 20", timeout=3)))
-    worker.start()
-    until(lambda: len(rig.agent.job_tree()) > 1, what="the device to start sleep")
-    tree = rig.agent.job_tree()
-    worker.join(20)
-    assert timed_out["returncode"] == 124 and timed_out.get("hermes_timed_out") is True
-    until(lambda: not alive(tree), what="the device to kill the timed-out job's process tree")
+    run = device_executor.run
 
-    cancelled = {}
-    worker = threading.Thread(target=lambda: cancelled.update(env.execute("sleep 20", timeout=30)))
+    def run_with_timeout_margin(script, *, timeout, **kwargs):
+        return run(script, timeout=timeout + 30, **kwargs)
+
+    # Let the gateway deadline cancel the job before the independent device watchdog.
+    monkeypatch.setattr(device_executor, "run", run_with_timeout_margin)
+
+    tree = []
+
+    def device_started():
+        snapshot = rig.agent.job_tree()
+        if len(snapshot) > 1 and len(alive(snapshot)) == len(snapshot):
+            tree[:] = snapshot
+            return True
+        return False
+
+    timeout = 10
+    timed_out = {}
+    worker = threading.Thread(target=lambda: timed_out.update(env.execute("sleep 120", timeout=timeout)))
+    began = time.monotonic()
     worker.start()
-    until(lambda: len(rig.agent.job_tree()) > 1, what="the device to start sleep")
-    tree = rig.agent.job_tree()
+    until(device_started, what="a live device process tree before the timeout", timeout=timeout)
+    assert tree, "the timed-out job must have a nonempty process-tree snapshot"
+    started = time.monotonic()
+    worker.join(timeout + 10)
+    returned = time.monotonic()
+    assert not worker.is_alive(), "the gateway timeout worker did not finish"
+    assert timeout <= returned - began < timeout + 10, "the gateway did not return near its timeout"
+    assert returned - started < timeout + 10
+    assert timed_out["returncode"] == 124 and timed_out.get("hermes_timed_out") is True, timed_out
+    until(lambda: not alive(tree), what="every timed-out device process to die", timeout=max(0, returned + 10 - time.monotonic()))
+
+    tree = []
+    cancelled = {}
+    worker = threading.Thread(target=lambda: cancelled.update(env.execute("sleep 120", timeout=30)))
+    worker.start()
+    until(device_started, what="a live device process tree before cancellation", timeout=10)
+    assert tree, "the cancelled job must have a nonempty process-tree snapshot"
+    started = time.monotonic()
     set_interrupt(True, thread_id=worker.ident)  # what /stop does to the tool thread
     try:
-        worker.join(20)
+        worker.join(10)
     finally:
         set_interrupt(False, thread_id=worker.ident)
-    assert cancelled["returncode"] == 130 and cancelled.get("hermes_interrupted") is True
-    until(lambda: not alive(tree), what="the device to kill the cancelled job's process tree")
+    returned = time.monotonic()
+    assert not worker.is_alive(), "the gateway cancel worker did not finish"
+    assert returned - started < 10, "the gateway did not return promptly after cancellation"
+    assert cancelled["returncode"] == 130 and cancelled.get("hermes_interrupted") is True, cancelled
+    until(lambda: not alive(tree), what="every cancelled device process to die", timeout=max(0, returned + 10 - time.monotonic()))
     assert env.execute("echo still serving")["output"].strip() == "still serving"
 
 

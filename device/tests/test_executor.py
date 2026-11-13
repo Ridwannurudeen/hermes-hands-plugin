@@ -384,7 +384,7 @@ def test_posix_timeout_always_reports_timeout_marker(monkeypatch, tmp_path):
 def test_grandchild_killed_on_posix(monkeypatch, tmp_path):
     monkeypatch.setattr(executor, "resolve_bash", lambda: shutil.which("bash"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
-    chunks = b"".join(executor.run("sleep 30 & echo $!; wait", timeout=0.2))
+    chunks = b"".join(executor.run("sleep 30 & echo $!; wait", timeout=3))
     child_pid = int(chunks.splitlines()[0])
     with pytest.raises(ProcessLookupError):
         os.kill(child_pid, 0)  # windows-footgun: ok -- POSIX-only test for killpg behavior

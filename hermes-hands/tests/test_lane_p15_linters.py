@@ -11,7 +11,7 @@ import pytest
 pytest.importorskip("tools.file_operations")
 
 from hands import environment, messages  # noqa: E402
-from hands_fakes import hands_db, wired  # noqa: E402,F401
+from hands_fakes import device_bindir, hands_db, wired  # noqa: E402,F401
 from test_environment import (  # noqa: E402,F401
     fresh_session_cwds,
     hands_backend,
@@ -62,7 +62,7 @@ def test_lint_templates_equal_the_real_core(monkeypatch, windows, extension, bin
 @pytest.mark.parametrize("extension,binary,flags", LINTERS)
 @pytest.mark.parametrize("mutation", [None, "destination", "flags", "append"])
 def test_registered_core_linter_reaches_only_the_approved_destination(
-    dispatch, monkeypatch, tool, extension, binary, flags, mutation, gateway_windows, device_windows,
+    dispatch, device_bindir, monkeypatch, tool, extension, binary, flags, mutation, gateway_windows, device_windows,
 ):
     from tools import file_tools
     from tools.environments import local
@@ -73,8 +73,7 @@ def test_registered_core_linter_reaches_only_the_approved_destination(
     monkeypatch.setattr(store, "get_device", lambda name: {**device, "os": "Windows" if device_windows else "Linux"})
     monkeypatch.setattr(local, "_IS_WINDOWS", gateway_windows)
     monkeypatch.setattr(environment, "os", SimpleNamespace(**{**vars(os), "name": "nt" if gateway_windows else "posix"}))
-    bindir = d.home / "bin"
-    bindir.mkdir()
+    bindir = device_bindir
     trace = d.home / "lint-arguments.txt"
     executable = bindir / binary
     executable.write_text(
@@ -82,7 +81,6 @@ def test_registered_core_linter_reaches_only_the_approved_destination(
         encoding="utf-8",
     )
     executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     path = d.home / "work" / ("check" + extension)
     path.write_bytes(b"public\n")
     args = {"path": f"{d.base}/work/check{extension}", **(
@@ -116,6 +114,8 @@ def test_registered_core_linter_reaches_only_the_approved_destination(
     if mutation is None and not gateway_windows:
         assert not json.loads(result).get("error"), result
         mapped = f"{binary} {flags} {environment._quoted(str(path).replace(chr(92), chr(47)) if device_windows else args['path'])} 2>&1"
+        if device_windows and os.name != "nt":
+            mapped = f'{binary} {flags} "$(cygpath -m {shlex.quote(args["path"])})" 2>&1'
         assert jobs and all(mapped.replace("'", "'\\''") in job["script"] for job in jobs)
         assert all(job["timeout"] == 30 for job in jobs)
         assert trace.read_text(encoding="utf-8").splitlines() == [*flags.split(), str(path).replace("\\", "/") if device_windows else args["path"]]
@@ -130,7 +130,7 @@ def test_registered_core_linter_reaches_only_the_approved_destination(
 @pytest.mark.parametrize("root", ["/approved", "/mnt/c/approved", "/cygdrive/c/approved"])
 @pytest.mark.parametrize("extension,binary,flags", LINTERS)
 def test_linter_refuses_an_unproven_windows_native_destination(
-    dispatch, monkeypatch, device_windows, root, extension, binary, flags,
+    dispatch, device_bindir, monkeypatch, device_windows, root, extension, binary, flags,
 ):
     from hands import store
     from tools.environments import local
@@ -142,14 +142,12 @@ def test_linter_refuses_an_unproven_windows_native_destination(
     monkeypatch.setattr(store, "get_device", lambda name: {**device, "os": "Windows" if device_windows else "Linux"})
     monkeypatch.setattr(local, "_IS_WINDOWS", False)
     monkeypatch.setattr(environment, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
-    bindir = d.home / "bin"
-    bindir.mkdir()
+    bindir = device_bindir
     trace = d.home / "lint-arguments.txt"
     (bindir / binary).write_text(
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + shlex.quote(f"{d.base}/lint-arguments.txt") + "\n", encoding="utf-8",
     )
     (bindir / binary).chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     monkeypatch.setattr(test_lane_p8_findings, "bash_job", lambda job: bash_job({
         **job, "script": job["script"].replace(root, d.base),
     }))
@@ -177,7 +175,7 @@ def test_linter_refuses_an_unproven_windows_native_destination(
 @pytest.mark.parametrize("extension,binary,flags", LINTERS)
 @pytest.mark.parametrize("mutation", [None, "destination", "flags", "append"])
 def test_windows_tmp_linter_uses_the_exact_approved_destination(
-    dispatch, monkeypatch, tool, extension, binary, flags, mutation,
+    dispatch, device_bindir, monkeypatch, tool, extension, binary, flags, mutation,
 ):
     from hands import store
     from tools.environments import local
@@ -189,8 +187,7 @@ def test_windows_tmp_linter_uses_the_exact_approved_destination(
     monkeypatch.setattr(store, "get_device", lambda name: {**device, "os": "Windows"})
     monkeypatch.setattr(local, "_IS_WINDOWS", False)
     monkeypatch.setattr(environment, "os", SimpleNamespace(**{**vars(os), "name": "posix"}))
-    bindir = d.home / "bin"
-    bindir.mkdir()
+    bindir = device_bindir
     trace = d.home / "lint-arguments.txt"
     executable = bindir / binary
     executable.write_text(
@@ -198,7 +195,6 @@ def test_windows_tmp_linter_uses_the_exact_approved_destination(
         encoding="utf-8",
     )
     executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     root = "/tmp/hands-approved"
     monkeypatch.setattr(test_lane_p8_findings, "bash_job", lambda job: bash_job({
         **job, "script": job["script"].replace(root, d.base),
