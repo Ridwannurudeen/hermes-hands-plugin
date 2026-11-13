@@ -52,6 +52,8 @@ def device_bindir(tmp_path, monkeypatch):
             encoding="utf-8",
         )
         cygpath.chmod(0o755)
+    # A fake device must not source the gateway login profile (nvm probes node there).
+    monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
     return bindir
 

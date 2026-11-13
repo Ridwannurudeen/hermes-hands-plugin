@@ -118,7 +118,7 @@ def test_registered_core_linter_reaches_only_the_approved_destination(
             mapped = f'{binary} {flags} "$(cygpath -m {shlex.quote(args["path"])})" 2>&1'
         assert jobs and all(mapped.replace("'", "'\\''") in job["script"] for job in jobs)
         assert all(job["timeout"] == 30 for job in jobs)
-        assert trace.read_text(encoding="utf-8").splitlines() == [*flags.split(), str(path).replace("\\", "/") if device_windows else args["path"]]
+        assert trace.read_text(encoding="utf-8-sig").splitlines() == [*flags.split(), str(path).replace("\\", "/") if device_windows else args["path"]]
         assert all(item["returncode"] == 0 for item in refused), refused
     else:
         assert jobs == [] and not trace.exists()
@@ -168,7 +168,7 @@ def test_linter_refuses_an_unproven_windows_native_destination(
     else:
         expected = f"{binary} {flags} {environment._quoted(args['path'])} 2>&1"
         assert jobs and all(expected.replace("'", "'\\''") in job["script"] for job in jobs)
-        assert trace.read_text(encoding="utf-8").splitlines() == [*flags.split(), f"{d.base}/work/check{extension}"]
+        assert trace.read_text(encoding="utf-8-sig").splitlines() == [*flags.split(), f"{d.base}/work/check{extension}"]
 
 
 @pytest.mark.parametrize("tool", ["write_file", "patch"])
@@ -228,7 +228,7 @@ def test_windows_tmp_linter_uses_the_exact_approved_destination(
         expected = f'{binary} {flags} "$(cygpath -m {shlex.quote(args["path"])})" 2>&1'
         assert jobs and all(expected.replace("'", "'\\''") in job["script"] for job in jobs)
         assert all(job["timeout"] == 30 for job in jobs)
-        assert trace.read_text(encoding="utf-8").splitlines() == [*flags.split(), str(path).replace("\\", "/")]
+        assert trace.read_text(encoding="utf-8-sig").splitlines() == [*flags.split(), str(path).replace("\\", "/")]
         assert refused and all(item["returncode"] == 0 for item in refused), (result, refused)
     else:
         assert jobs == [] and not trace.exists()
