@@ -102,36 +102,38 @@ def kill(targets):
                 pass
 print("ready", flush=True)
 next_pass = float("-inf")
-while True:
-    if time.monotonic() >= next_pass:
-        groups.update(refresh_all(groups))
-        next_pass = time.monotonic() + 0.1
-    ready, _, _ = select.select([sys.stdin], [], [], max(0, next_pass - time.monotonic()))
-    if not ready:
-        continue
-    line = sys.stdin.readline()
-    if not line:
-        break
-    action, pgid, *created = line.split()
-    pgid = int(pgid)
-    if action in ("add", "set"):
-        members = {int(pid): value for pid, value in json.loads(created[1]).items()} if len(created) > 1 else {pgid: float(created[0])}
-        if action == "add":
-            seen.pop(pgid, None)
-        groups[pgid] = refresh(pgid, members)
-    elif action == "check" and pgid in groups:
-        groups[pgid] = refresh(pgid, groups[pgid])
-    elif action == "checkall":
-        groups.update(refresh_all(groups))
-    elif action == "kill":
-        kill({pgid: groups.pop(pgid, {})})
-    elif action == "killall":
-        kill(groups)
-        groups.clear()
-    elif action == "del":
-        groups.pop(pgid, None)
-    print("ack " + json.dumps(groups if action == "checkall" else groups.get(pgid, {})), flush=True)
-kill(groups)
+try:
+    while True:
+        if time.monotonic() >= next_pass:
+            groups.update(refresh_all(groups))
+            next_pass = time.monotonic() + 0.1
+        ready, _, _ = select.select([sys.stdin], [], [], max(0, next_pass - time.monotonic()))
+        if not ready:
+            continue
+        line = sys.stdin.readline()
+        if not line:
+            break
+        action, pgid, *created = line.split()
+        pgid = int(pgid)
+        if action in ("add", "set"):
+            members = {int(pid): value for pid, value in json.loads(created[1]).items()} if len(created) > 1 else {pgid: float(created[0])}
+            if action == "add":
+                seen.pop(pgid, None)
+            groups[pgid] = refresh(pgid, members)
+        elif action == "check" and pgid in groups:
+            groups[pgid] = refresh(pgid, groups[pgid])
+        elif action == "checkall":
+            groups.update(refresh_all(groups))
+        elif action == "kill":
+            kill({pgid: groups.pop(pgid, {})})
+        elif action == "killall":
+            kill(groups)
+            groups.clear()
+        elif action == "del":
+            groups.pop(pgid, None)
+        print("ack " + json.dumps(groups if action == "checkall" else groups.get(pgid, {})), flush=True)
+finally:
+    kill(groups)
 '''
 
 
