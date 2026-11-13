@@ -316,7 +316,9 @@ def test_post_exit_drain_budget_ignores_pre_exit_backpressure(monkeypatch, tmp_p
     pid_file = tmp_path / "writer.pid"
     script = (
         "head -c 65536 /dev/zero | tr '\\000' x; sleep 0.6; "
-        f'(for i in {{1..100}}; do printf y; sleep 0.05; done) & echo $! > "{pid_file.as_posix()}"; '
+        "(for i in {1..100}; do printf y; sleep 0.05; done) & writer=$!; "
+        '[ -r "/proc/$writer/winpid" ] && writer=$(cat "/proc/$writer/winpid"); '
+        f'echo $writer > "{pid_file.as_posix()}"; '
         "printf 'PARENT_EXIT\\n'"
     )
     output = bytearray()
@@ -338,7 +340,13 @@ def test_post_exit_drain_budget_ignores_pre_exit_backpressure(monkeypatch, tmp_p
         if pid_file.exists():
             pid = int(pid_file.read_text(encoding="utf-8-sig"))
             if psutil.pid_exists(pid):
-                psutil.Process(pid).kill()
+                try:
+                    process = psutil.Process(pid)
+                    ours = os.name != "nt" or process.name().lower().startswith("bash")
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    ours = False
+                if ours:
+                    process.kill()
 
     assert exit_marker_at is not None
     assert truncated_after_exit is not None

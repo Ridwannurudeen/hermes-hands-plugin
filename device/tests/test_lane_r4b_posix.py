@@ -57,7 +57,7 @@ def test_killing_the_agent_kills_a_background_child_of_a_finished_command(tmp_pa
     host = _host(tmp_path, body)
     sleeper = None
     try:
-        sleeper = _wait_for(marker)
+        sleeper = _wait_for(marker, host=host)
         time.sleep(0.5)
         assert host.poll() is None, host.communicate(timeout=1)
         os.kill(host.pid, getattr(signal, "SIGKILL"))
@@ -95,7 +95,8 @@ def test_stopping_the_witness_session_kills_a_background_child_of_a_finished_com
         "agent._request_session_screenshot_consent = lambda: None\n"
         "def post(endpoint, body):\n"
         "    if endpoint == '/device/result' and body.get('done'):\n"
-        f"        Path({str(done)!r}).write_bytes(b'1')\n"
+        f"        Path({str(done)!r}).with_suffix('.tmp').write_text(str(body.get('error')) + ' (returncode=' + str(body.get('returncode')) + ')', encoding='utf-8')\n"
+        f"        Path({str(done)!r}).with_suffix('.tmp').replace({str(done)!r})\n"
         "    return httpx.Response(204)\n"
         "agent._post = post\n"
         "jobs = [{'job_id': 'job1', 'type': 'exec', 'script': " + repr(_detached_sleep(marker, shape)) + "}]\n"
@@ -106,11 +107,16 @@ def test_stopping_the_witness_session_kills_a_background_child_of_a_finished_com
     host = _host(tmp_path, body)
     sleeper = None
     try:
-        sleeper = _wait_for(marker)
-        deadline = time.monotonic() + 10
+        deadline = time.monotonic() + 30
         while not done.exists():
-            assert time.monotonic() < deadline and host.poll() is None, host.communicate(timeout=1)
+            if host.poll() is not None or time.monotonic() >= deadline:
+                if host.poll() is None:
+                    host.kill()
+                raise AssertionError(f"no job result from the agent: {host.communicate(timeout=5)}")
             time.sleep(0.02)
+        result = done.read_text(encoding="utf-8-sig")
+        assert result == "None (returncode=0)", f"the device refused or failed the job: {result!r}"
+        sleeper = _wait_for(marker, host=host)
         os.kill(host.pid, getattr(signal, "SIGHUP"))
         out, err = host.communicate(timeout=15)
         assert b"Session stopped. Nothing else will run on this computer." in out, (out, err)

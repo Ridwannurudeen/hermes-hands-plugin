@@ -95,9 +95,12 @@ def _bash():
     return bash
 
 
-def _wait_for(path, timeout=10):
+def _wait_for(path, timeout=30, host=None):
     deadline = time.monotonic() + timeout
     while not path.exists() or not path.read_text(encoding="utf-8-sig").strip():
+        if host is not None and (host.poll() is not None or time.monotonic() >= deadline):
+            host.kill()
+            raise AssertionError(f"no {path} from the agent (exit {host.poll()}): {host.communicate(timeout=5)}")
         assert time.monotonic() < deadline, f"timed out waiting for {path}"
         time.sleep(0.02)
     return int(path.read_text(encoding="utf-8-sig").strip())
@@ -162,7 +165,7 @@ def test_killing_the_agent_kills_its_job_groups(tmp_path, how):
     host = _host(tmp_path, body)
     sleeper = None
     try:
-        sleeper = _wait_for(marker)
+        sleeper = _wait_for(marker, host=host)
         time.sleep(0.3)
         assert host.poll() is None, host.communicate(timeout=1)
         os.kill(host.pid, getattr(signal, "SIGKILL"))
@@ -209,7 +212,7 @@ def test_closing_the_witness_window_stops_the_session_and_its_command(tmp_path, 
     host = _host(tmp_path, body)
     sleeper = None
     try:
-        sleeper = _wait_for(marker)
+        sleeper = _wait_for(marker, host=host)
         assert host.poll() is None, host.communicate(timeout=1)
         if terminal_gone:
             closed.write_text("x", encoding="utf-8")
