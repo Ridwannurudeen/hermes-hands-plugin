@@ -79,9 +79,9 @@ def test_no_doc_says_the_device_package_is_already_on_pypi():
         assert re.findall(r"published on PyPI|on PyPI as|package on PyPI|PyPI package", text) == [], path.name
 
 
-def test_the_first_device_install_is_the_git_install_at_the_reviewed_commit():
-    """Device installs use the full commit whose device code the maintainers reviewed."""
-    expected = "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@7e078a50d3a09066aa3e95c3c1a86a9ec221996b#subdirectory=device"
+def test_the_first_device_install_is_the_git_install_at_the_pinned_device_commit():
+    """Device installs use the full commit with the guardian cleanup fix."""
+    expected = "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb#subdirectory=device"
     for path in (REPO / "README.md", REPO / "hermes-hands" / "README.md", REPO / "docs" / "CATALOG-PR-BODY.draft.md"):
         text = _text(path)
         installs = re.findall(r'pipx install "([^"]+)"', text)

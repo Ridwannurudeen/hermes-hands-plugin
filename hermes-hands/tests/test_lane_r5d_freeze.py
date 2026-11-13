@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "check-freeze.py"
-DEVICE_COMMIT = "7e078a50d3a09066aa3e95c3c1a86a9ec221996b"
+DEVICE_COMMIT = "f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb"
 RELEASE_COMMIT = "a" * 40
 ZEROS = "0" * 40
 

@@ -4,7 +4,7 @@
 # 2. Copy this draft to plugin-catalog/hermes-hands.yaml in hermes-agent and remove comment lines.
 # 3. In that copy set sha to the release commit and replace both URL commit tokens with that
 #    same full SHA, in docs_url and image. Remove the comment after sha. Keep this draft unchanged:
-#    a commit cannot contain its own hash. The device package stays 0.2.0 at its reviewed commit.
+#    a commit cannot contain its own hash. The device package stays 0.2.0 with the guardian cleanup fix.
 # 4. Run python scripts/check-freeze.py --catalog <path-to-filled-copy> from this repository.
 #    Normal mode reports the three unfilled draft fields until a filled copy is supplied.
 # 5. In hermes-agent run python scripts/validate_plugin_catalog.py plugin-catalog/hermes-hands.yaml.
@@ -26,7 +26,7 @@ description: >-
   Disclosure: runs shell commands and file operations on the device as its logged in user (not a
   sandbox); a compromised gateway or helper account can still command paired devices; the device
   agent is a separate Python package (hermes-hands), installed with pipx from this repository at the
-  reviewed commit (a full 40 character SHA), that keeps its private key in the OS keyring or an owner only file; command text, which can hold sensitive arguments, is kept in local receipts;
+  pinned device commit (a full 40 character SHA), that keeps its private key in the OS keyring or an owner only file; command text, which can hold sensitive arguments, is kept in local receipts;
   screenshots are cached on the gateway and go to the configured vision model and chat platform;
   the checkup probes 1.1.1.1, 8.8.8.8 and 9.9.9.9 on port 443 and resolves example.com; optional H
   help puts device text into a user-role model turn; no telemetry.

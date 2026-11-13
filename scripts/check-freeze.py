@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check plugin 0.2.1 release pins and reviewed device installs without changing tags.
+"""Check plugin 0.2.1 release pins and pinned device installs without changing tags.
 
 The checkout draft deliberately leaves sha, docs_url and image for the lead to fill in the
 hermes-agent catalog copy after the release commit exists. Normal mode reports these three
@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 PLACEHOLDERS = ("0" * 40, "FILL AT FREEZE", "{release_commit}")
 CATALOG = "docs/CATALOG-ENTRY.draft.yaml"
 PLUGIN_VERSION = "0.2.1"
-DEVICE_COMMIT = "7e078a50d3a09066aa3e95c3c1a86a9ec221996b"
+DEVICE_COMMIT = "f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb"
 
 
 def _scan(repo: Path, name: str, text: str, label: str) -> list[str]:
@@ -47,7 +47,7 @@ def _scan(repo: Path, name: str, text: str, label: str) -> list[str]:
             if re.fullmatch(r"[0-9a-f]{40}", ref) is None:
                 found.append(f"{label}:{number}: device install must name a full 40 character commit SHA: {spec}")
             elif ref != DEVICE_COMMIT:
-                found.append(f"{label}:{number}: device install must pin the reviewed commit {DEVICE_COMMIT}: {spec}")
+                found.append(f"{label}:{number}: device install must pin the device commit {DEVICE_COMMIT}: {spec}")
     return found
 
 

@@ -1,6 +1,8 @@
 # Add Hermes Hands to the plugin catalog
 
-Draft pull request body for NousResearch/hermes-agent, describing plugin 0.2.1 and the unchanged device package 0.2.0. The catalog entry is `plugin-catalog/hermes-hands.yaml`.
+Draft pull request body for NousResearch/hermes-agent, describing plugin 0.2.1 and device package 0.2.0. The catalog entry is `plugin-catalog/hermes-hands.yaml`.
+
+Device non-test files are byte-identical to `7e078a50d3a09066aa3e95c3c1a86a9ec221996b` except `executor.py`: if the agent died before a guardian acknowledgement write, the write could fail and skip job-group cleanup. The guardian loop now uses `try/finally` so an acknowledgement write failure still invokes cleanup for registered job groups; its process identity checks are unchanged. The device version remains 0.2.0, but this pinned build differs from the published v0.2.0 tag.
 
 ## What it does
 
@@ -50,7 +52,7 @@ In both Hermes 0.23.0 and 0.23.1, `tools/file_tools.py:328-335` returns the cach
 In a witness session, an omitted or null terminal `timeout` for a foreground command becomes one explicit default from the public configuration bridge (180 seconds when unset), shown on the approval card and dispatched unchanged. Preserving the scoped profile default needs a public accessor. A background command has no time limit: in a witness session an explicit `timeout` is refused; leave out `timeout`; press S to stop it. Its approval card shows `background=true` and the no-time-limit statement without a timeout.
 
 
-CI runs the full automated suite on Hermes 0.23.1; `requires_hermes` is `>=0.23.1` in both the manifest and the entry. The gateway supports Linux and WSL. Devices are native Windows with Git Bash and Linux; macOS devices are not supported. The device installs with `pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@7e078a50d3a09066aa3e95c3c1a86a9ec221996b#subdirectory=device"` (the reviewed commit, pinned by its full 40 character SHA); screenshots work after that install on a desktop session, with the person's yes for each shot. Witness mode needs an interactive terminal and cannot run as a service.
+CI runs the full automated suite on Hermes 0.23.1; `requires_hermes` is `>=0.23.1` in both the manifest and the entry. The gateway supports Linux and WSL. Devices are native Windows with Git Bash and Linux; macOS devices are not supported. The device installs with `pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb#subdirectory=device"` (the commit with the guardian cleanup fix, pinned by its full 40 character SHA); screenshots work after that install on a desktop session, with the person's yes for each shot. Witness mode needs an interactive terminal and cannot run as a service.
 
 Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction.
 
