@@ -313,7 +313,7 @@ def test_pair_codes_are_given_only_in_a_direct_chat(monkeypatch):
 
 def test_the_backend_is_read_the_way_hermes_resolves_it(monkeypatch, tmp_path):
     """V49: config.yaml terminal.backend wins; without it TERMINAL_ENV (the .env or the launch
-    environment) selects the backend, as core's terminal_scope does."""
+    environment) selects the backend, as core's terminal_scope does in a single-profile process."""
     pytest.importorskip("tools.terminal_scope")
     from hermes_cli.env_loader import load_hermes_dotenv
     from tools.terminal_scope import build_profile_terminal_scope
@@ -366,7 +366,7 @@ def test_the_backend_uses_get_secret_without_loading_env_files(monkeypatch, tmp_
 
 @pytest.mark.parametrize("scope", [None, {"TERMINAL_ENV": "ssh"}])
 @pytest.mark.parametrize("backend", [None, "hands"])
-def test_the_backend_matches_get_secret_under_multiplexing(monkeypatch, tmp_path, scope, backend):
+def test_the_backend_ignores_a_bound_secret_scope_under_multiplexing(monkeypatch, tmp_path, scope, backend):
     """Core v0.23.1 treats TERMINAL_* as global even with no profile scope bound."""
     secret_scope = pytest.importorskip("agent.secret_scope")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
@@ -377,7 +377,6 @@ def test_the_backend_matches_get_secret_under_multiplexing(monkeypatch, tmp_path
     multiplex_token = secret_scope.set_multiplex_context(True)
     scope_token = secret_scope.set_secret_scope(scope)
     try:
-        assert commands.terminal_backend() == (secret_scope.get_secret("TERMINAL_ENV") or "local")
         assert commands.terminal_backend() == (backend or "local")
     finally:
         secret_scope.reset_secret_scope(scope_token)

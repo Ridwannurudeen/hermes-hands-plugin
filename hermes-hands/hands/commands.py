@@ -274,7 +274,10 @@ def _help_origin(platform: str, source) -> dict | None:
 
 def terminal_backend() -> str:
     """config.yaml terminal.backend as written, else TERMINAL_ENV through Hermes's get_secret,
-    else local. A managed-scope pin is not seen; the answer only words /hands use and doctor."""
+    else local. A managed-scope pin is not seen; the answer only words /hands use and doctor.
+    On a multiplexing gateway TERMINAL_* is process-global in get_secret, so a routed profile
+    that sets the backend only in its .env is not seen; set terminal.backend in that profile's
+    config.yaml."""
     from agent.secret_scope import get_secret
     from hermes_cli.config import read_raw_config_readonly
 
