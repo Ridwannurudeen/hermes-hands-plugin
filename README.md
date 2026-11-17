@@ -6,6 +6,27 @@ Hermes Hands pairs a Windows or Linux computer with a one-time code. Hermes runs
 
 **Beyond one laptop:** use the same pairing model for another workstation, a GPU box, or a Pi.
 
+## Try it in 5 minutes
+
+This path is for one Windows machine. Hermes and the relay run in WSL 2 (Ubuntu), the device agent runs on Windows itself, and the two pair over loopback, so it needs no domain, nginx or certificate. The device accepts plain `http` only for a loopback address. You need Hermes 0.23.1 or later in WSL and the Windows prerequisites in [Device](#device). For a device on another machine, use [Gateway](#gateway).
+
+1. In WSL, install the plugin from this repository at a pinned commit: `hermes plugins install Ridwannurudeen/hermes-hands-plugin/hermes-hands --ref d759def7b0a7ce026a65769e47d44de1218ac57e --enable`. `hermes plugins list` then shows `hermes-hands`.
+2. Run `hermes hands setup`. It prints `Relay seed saved.` and the next two commands; press Enter at the Telegram prompt to skip it. Then run `hermes config set terminal.backend hands` and `hermes config set bot_desktop.placement gateway`, and restart the gateway if one is running.
+3. In a second WSL terminal, start the dashboard, which hosts the relay, and leave it running: `hermes dashboard --host 127.0.0.1 --port 9119 --no-open`. Back in the first terminal, `hermes hands doctor` prints `PASS` on every check and one `WARN` about H help, which is optional.
+4. In PowerShell on Windows, install the device agent:
+
+   ```powershell
+   pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb#subdirectory=device"
+   ```
+
+   `hermes-hands doctor` then prints `gateway: not paired`.
+
+5. In WSL, run `hermes hands pair laptop --owner-label "Sam"`. It prints a `hermes-hands pair http://127.0.0.1:9119 ...` command with a one-time code. Run that command in PowerShell with `localhost` in place of `127.0.0.1`; it prints `Paired as` and a device ID. Then run `hermes-hands serve` and leave it running.
+6. In WSL, `hermes hands status` prints `Relay: up` and `laptop: online`.
+7. Send local chats to the device with `hermes config set plugins.entries.hermes-hands.settings.default_target laptop`, start `hermes`, and ask it to run `pwd` in the terminal. The answer is your Windows home folder, such as `/c/Users/you`, not a Linux `/home` path. Undo it with `hermes config unset plugins.entries.hermes-hands.settings.default_target`.
+
+Step 5 relies on WSL 2 forwarding a port bound to localhost in WSL to `localhost` on Windows. That is on by default in WSL's default NAT networking mode and stops working if `localhostForwarding=false` is set under `[wsl2]` in `.wslconfig`. To choose the device from Telegram, and for witness mode, continue with [Quick start](#quick-start) and [Witness mode](#witness-mode-help-someone-elses-computer).
+
 ## Quick start
 
 1. On the gateway host (Linux, or Windows inside WSL), install Hermes 0.23.1 or later. Once Hermes Hands is listed in the plugin catalog, install and enable the reviewed plugin with `hermes plugins install hermes-hands --enable`. Then run `hermes hands setup` and follow its prompts.
