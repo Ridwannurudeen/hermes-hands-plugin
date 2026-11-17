@@ -273,19 +273,15 @@ def _help_origin(platform: str, source) -> dict | None:
 
 
 def terminal_backend() -> str:
-    """The terminal backend Hermes resolves for this profile: config.yaml terminal.backend as written,
-    else TERMINAL_ENV from this process's environment, else from the profile .env, else local
-    (terminal_scope.py:114-130). A managed-scope pin is not seen; the answer only words /hands use
-    and doctor."""
-    from agent.secret_scope import load_env_file
+    """config.yaml terminal.backend as written, else TERMINAL_ENV through Hermes's get_secret,
+    else local. A managed-scope pin is not seen; the answer only words /hands use and doctor."""
+    from agent.secret_scope import get_secret
     from hermes_cli.config import read_raw_config_readonly
-    from hermes_constants import get_hermes_home
 
     terminal = read_raw_config_readonly().get("terminal")
     if isinstance(terminal, dict) and terminal.get("backend") is not None:
         return str(terminal["backend"])
-    profile = load_env_file(get_hermes_home() / ".env")
-    return os.environ.get("TERMINAL_ENV", profile.get("TERMINAL_ENV", "local"))
+    return get_secret("TERMINAL_ENV") or "local"
 
 
 def _is_owner(ctx, platform: str, source) -> bool:

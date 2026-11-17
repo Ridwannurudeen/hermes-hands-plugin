@@ -315,12 +315,14 @@ def test_the_backend_is_read_the_way_hermes_resolves_it(monkeypatch, tmp_path):
     """V49: config.yaml terminal.backend wins; without it TERMINAL_ENV (the .env or the launch
     environment) selects the backend, as core's terminal_scope does."""
     pytest.importorskip("tools.terminal_scope")
+    from hermes_cli.env_loader import load_hermes_dotenv
     from tools.terminal_scope import build_profile_terminal_scope
 
     def core():
         launch = {key: value for key, value in os.environ.items() if key.startswith("TERMINAL_")}
         return build_profile_terminal_scope(tmp_path, env_overlay=launch)["TERMINAL_ENV"]
 
+    monkeypatch.setattr(os, "environ", os.environ.copy())
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("TERMINAL_ENV", raising=False)
     assert commands.terminal_backend() == core() == "local"
@@ -329,6 +331,7 @@ def test_the_backend_is_read_the_way_hermes_resolves_it(monkeypatch, tmp_path):
     assert commands.terminal_backend() == core() == "hands"
     monkeypatch.delenv("TERMINAL_ENV")
     (tmp_path / ".env").write_text("TERMINAL_ENV=hands\n", encoding="utf-8")
+    load_hermes_dotenv(hermes_home=tmp_path, load_external_secrets=False)
     assert commands.terminal_backend() == core() == "hands"
     monkeypatch.setenv("TERMINAL_ENV", "ssh")
     assert commands.terminal_backend() == core() == "ssh"
@@ -337,6 +340,48 @@ def test_the_backend_is_read_the_way_hermes_resolves_it(monkeypatch, tmp_path):
     assert commands.terminal_backend() == core() == "local"
     (tmp_path / "config.yaml").write_text("terminal:\n  cwd: /srv\n", encoding="utf-8")
     assert commands.terminal_backend() == core() == "hands"
+
+
+def test_the_backend_uses_get_secret_without_loading_env_files(monkeypatch, tmp_path):
+    secret_scope = pytest.importorskip("agent.secret_scope")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("TERMINAL_ENV", "ssh")
+    reads = []
+
+    def get_secret(name):
+        reads.append(name)
+        return "hands"
+
+    def refuse_file_read(path):
+        pytest.fail("The plugin must not load env files")
+
+    monkeypatch.setattr(secret_scope, "get_secret", get_secret)
+    monkeypatch.setattr(secret_scope, "load_env_file", refuse_file_read)
+    assert commands.terminal_backend() == "hands"
+    assert reads == ["TERMINAL_ENV"]
+    (tmp_path / "config.yaml").write_text("terminal:\n  backend: local\n", encoding="utf-8")
+    assert commands.terminal_backend() == "local"
+    assert reads == ["TERMINAL_ENV"]
+
+
+@pytest.mark.parametrize("scope", [None, {"TERMINAL_ENV": "ssh"}])
+@pytest.mark.parametrize("backend", [None, "hands"])
+def test_the_backend_matches_get_secret_under_multiplexing(monkeypatch, tmp_path, scope, backend):
+    """Core v0.23.1 treats TERMINAL_* as global even with no profile scope bound."""
+    secret_scope = pytest.importorskip("agent.secret_scope")
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    if backend is None:
+        monkeypatch.delenv("TERMINAL_ENV", raising=False)
+    else:
+        monkeypatch.setenv("TERMINAL_ENV", backend)
+    multiplex_token = secret_scope.set_multiplex_context(True)
+    scope_token = secret_scope.set_secret_scope(scope)
+    try:
+        assert commands.terminal_backend() == (secret_scope.get_secret("TERMINAL_ENV") or "local")
+        assert commands.terminal_backend() == (backend or "local")
+    finally:
+        secret_scope.reset_secret_scope(scope_token)
+        secret_scope.reset_multiplex_context(multiplex_token)
 
 
 def test_use_binds_the_target_to_the_person_who_sent_it(monkeypatch):

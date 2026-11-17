@@ -7,7 +7,7 @@ from pathlib import Path
 
 def register(ctx) -> None:
     """Load-time registration. The relay seed is read here, once, under the plugin manager's home
-    scope; request handlers and the lazily started relay never call ``get_secret``."""
+    scope; request handlers and the lazily started relay never read that seed."""
     from agent.secret_scope import get_secret
     from hermes_cli.dashboard_auth.token_auth import register_token_route
 
