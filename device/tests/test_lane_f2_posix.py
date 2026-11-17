@@ -142,7 +142,7 @@ def test_hermes_background_job_is_killed_when_the_session_stops(monkeypatch, tmp
 @POSIX
 def test_stopping_before_the_exited_leader_is_recorded_kills_the_background_job(monkeypatch, tmp_path):
     monkeypatch.setattr(executor, "resolve_bash", _bash)
-    monkeypatch.setattr(executor, "PIPE_DRAIN_GRACE", 5)
+    monkeypatch.setattr(executor, "PIPE_DRAIN_GRACE", 20)
     marker = tmp_path / "sleep.pid"
     script, _ = _hermes_background(tmp_path, f"echo $$ > {marker}; exec sleep 120")
     job = threading.Thread(target=lambda: list(executor.run(script, timeout=30)), daemon=True)
@@ -184,7 +184,7 @@ def test_killing_the_agent_kills_its_job_groups(tmp_path, how):
     if how.startswith("background"):
         script, _ = _hermes_background(tmp_path, f"echo $$ > {marker}; exec sleep 120")
         # A long drain grace keeps the agent from recording the exited leader's group, so only the guardian has it.
-        body = ("executor.PIPE_DRAIN_GRACE = 5\n" if how == "background_unrecorded" else "") + f"list(executor.run({script!r}, timeout=30))\nimport time\ntime.sleep(60)\n"
+        body = ("executor.PIPE_DRAIN_GRACE = 20\n" if how == "background_unrecorded" else "") + f"list(executor.run({script!r}, timeout=30))\nimport time\ntime.sleep(60)\n"
     else:
         body = f"list(executor.run({f'sleep 120 & echo $! > {marker}; wait'!r}, timeout=60))\n"
     host = _host(tmp_path, body)
