@@ -22,7 +22,7 @@ The console shows every device job, including core's one-time shell snapshot set
 
 ## Install and configure
 
-Install Hermes 0.23.1 or later on the gateway. The declared floor is `>=0.23.1`. Once Hermes Hands is listed in the plugin catalog, install and enable the reviewed plugin with `hermes plugins install hermes-hands --enable`. The plugin is version 0.2.1; the device package stays at 0.2.0. Then run `hermes hands setup`, apply its backend and placement settings, and start the dashboard on loopback. A device on another machine requires the HTTPS relay route described in the [full setup guide](../README.md#gateway).
+Install Hermes 0.23.1 or later on the gateway. The declared floor is `>=0.23.1`. Once Hermes Hands is listed in the plugin catalog, install and enable the reviewed plugin with `hermes plugins install hermes-hands --enable`. The plugin is version 0.2.1; the device package stays at 0.2.0. Then run `hermes hands setup`, apply its backend and placement settings, and start the dashboard on loopback. A device on another machine requires the HTTPS relay route described in the [full setup guide](../README.md#gateway). To try it on one Windows machine with no domain or certificate, follow [Try it in 5 minutes](../README.md#try-it-in-5-minutes).
 
 Device non-test files are byte-identical to `7e078a50d3a09066aa3e95c3c1a86a9ec221996b` except `executor.py`: if the agent died before a guardian acknowledgement write, the write could fail and skip job-group cleanup. The guardian loop now uses `try/finally` so an acknowledgement write failure still invokes cleanup for registered job groups; its process identity checks are unchanged. The device version remains 0.2.0, but this pinned build differs from the published v0.2.0 tag.
 
