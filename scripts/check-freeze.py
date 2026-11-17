@@ -23,7 +23,7 @@ REPO = Path(__file__).resolve().parent.parent
 PLACEHOLDERS = ("0" * 40, "FILL AT FREEZE", "{release_commit}")
 CATALOG = "docs/CATALOG-ENTRY.draft.yaml"
 PLUGIN_VERSION = "0.2.1"
-DEVICE_COMMIT = "f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb"
+DEVICE_COMMIT = "5e41ed0070c15ee05916a40290b9ea71e2709e49"
 
 
 def _scan(repo: Path, name: str, text: str, label: str) -> list[str]:

@@ -16,7 +16,7 @@ This path is for one Windows machine. Hermes and the relay run in WSL 2 (Ubuntu)
 4. In PowerShell on Windows, install the device agent:
 
    ```powershell
-   pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb#subdirectory=device"
+   pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@5e41ed0070c15ee05916a40290b9ea71e2709e49#subdirectory=device"
    ```
 
    `hermes-hands doctor` then prints `gateway: not paired`.
@@ -39,7 +39,7 @@ Step 5 relies on WSL 2 forwarding a port bound to localhost in WSL to `localhost
 
 The gateway plugin is version 0.2.1; the device package stays at 0.2.0. CI runs the full automated suite on Hermes 0.23.1. The supported minimum is Hermes 0.23.1; the manifest declares `>=0.23.1`. The plugin still imports two names outside Hermes's public plugin list, `register_token_route` and `LocalEnvironment`, which a later release can change (see [the hook request](docs/HOOK-REQUEST-ISSUE.md)).
 
-Device non-test files are byte-identical to `7e078a50d3a09066aa3e95c3c1a86a9ec221996b` except `executor.py`: if the agent died before a guardian acknowledgement write, the write could fail and skip job-group cleanup. The guardian loop now uses `try/finally` so an acknowledgement write failure still invokes cleanup for registered job groups; its process identity checks are unchanged. The device version remains 0.2.0, but this pinned build differs from the published v0.2.0 tag.
+Device non-test files are byte-identical to `7e078a50d3a09066aa3e95c3c1a86a9ec221996b` except `executor.py`, which has two changes. First, if the agent died before a guardian acknowledgement write, the write could fail and skip job-group cleanup. The guardian loop now uses `try/finally` so an acknowledgement write failure still invokes cleanup for registered job groups. Second, macOS refuses `getpgid` on an exited process that has not been reaped, so the guardian and the agent's own group check now treat an exited but unreaped group leader as still holding its group while its start time matches; no other process can lead that group until the leader is reaped. Its other process identity checks are unchanged. The device version remains 0.2.0, but this pinned build differs from the published v0.2.0 tag.
 
 ## What it provides
 
@@ -118,7 +118,7 @@ On Windows, in PowerShell:
 3. Open a new terminal again, then install the device agent:
 
    ```powershell
-   pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@f5ecec6a4c162e56a33a0f72edc2c6d476bc4afb#subdirectory=device"
+   pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@5e41ed0070c15ee05916a40290b9ea71e2709e49#subdirectory=device"
    ```
 
    This installs the device agent with the guardian cleanup fix, pinned by its full 40 character SHA. It needs Git on the PATH, which step 1 installs. The package is not on PyPI; use the pinned Git URL above.
