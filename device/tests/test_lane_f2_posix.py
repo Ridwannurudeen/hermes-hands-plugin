@@ -4,6 +4,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -138,6 +139,29 @@ def test_hermes_background_job_is_killed_when_the_session_stops(monkeypatch, tmp
     assert _gone(sleeper)
 
 
+@POSIX
+def test_stopping_before_the_exited_leader_is_recorded_kills_the_background_job(monkeypatch, tmp_path):
+    monkeypatch.setattr(executor, "resolve_bash", _bash)
+    monkeypatch.setattr(executor, "PIPE_DRAIN_GRACE", 5)
+    marker = tmp_path / "sleep.pid"
+    script, _ = _hermes_background(tmp_path, f"echo $$ > {marker}; exec sleep 120")
+    job = threading.Thread(target=lambda: list(executor.run(script, timeout=30)), daemon=True)
+    job.start()
+    sleeper = None
+    try:
+        sleeper = _wait_for(marker)
+        time.sleep(0.3)
+        assert job.is_alive()
+
+        executor._terminate_posix_groups()
+
+        assert _gone(sleeper), "the background job outlived the stop"
+    finally:
+        if sleeper is not None and psutil.pid_exists(sleeper):
+            os.kill(sleeper, getattr(signal, "SIGKILL"))
+        job.join(timeout=15)
+
+
 def _host(tmp_path, body):
     code = (
         "import sys\n"
@@ -153,13 +177,14 @@ def _host(tmp_path, body):
 
 
 @POSIX
-@pytest.mark.parametrize("how", ["background", "running"])
+@pytest.mark.parametrize("how", ["background", "background_unrecorded", "running"])
 def test_killing_the_agent_kills_its_job_groups(tmp_path, how):
     _bash()
     marker = tmp_path / "sleep.pid"
-    if how == "background":
+    if how.startswith("background"):
         script, _ = _hermes_background(tmp_path, f"echo $$ > {marker}; exec sleep 120")
-        body = f"list(executor.run({script!r}, timeout=30))\nimport time\ntime.sleep(60)\n"
+        # A long drain grace keeps the agent from recording the exited leader's group, so only the guardian has it.
+        body = ("executor.PIPE_DRAIN_GRACE = 5\n" if how == "background_unrecorded" else "") + f"list(executor.run({script!r}, timeout=30))\nimport time\ntime.sleep(60)\n"
     else:
         body = f"list(executor.run({f'sleep 120 & echo $! > {marker}; wait'!r}, timeout=60))\n"
     host = _host(tmp_path, body)

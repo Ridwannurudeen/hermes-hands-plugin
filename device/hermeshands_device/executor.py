@@ -55,6 +55,12 @@ def start(pid):
         with open("/proc/%d/stat" % pid, "rb") as stat:
             return float(stat.read().rsplit(b")", 1)[1].split()[19])
     return psutil.Process(pid).create_time()
+def in_group(pid, pgid):
+    # macOS refuses getpgid on an exited leader; until it is reaped no other process can lead its group.
+    try:
+        return os.getpgid(pid) == pgid
+    except ProcessLookupError:
+        return pid == pgid and psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
 def refresh_all(targets):
     found = {}
     for pgid, members in targets.items():
@@ -62,7 +68,7 @@ def refresh_all(targets):
         for pid, created in members.items():
             try:
                 current = start(pid)
-                if (current == created if linux else abs(current - created) <= 0.01) and os.getpgid(pid) == pgid:
+                if (current == created if linux else abs(current - created) <= 0.01) and in_group(pid, pgid):
                     live[pid] = created
             except (psutil.Error, OSError):
                 pass
@@ -218,12 +224,20 @@ def _boot_id() -> str | None:
         return None
 
 
+def _in_posix_group(pid: int, pgid: int) -> bool:
+    # macOS refuses getpgid on an exited leader; until run() reaps it no other process can lead its group.
+    try:
+        return os.getpgid(pid) == pgid
+    except ProcessLookupError:
+        return pid == pgid and psutil.Process(pid).status() == psutil.STATUS_ZOMBIE
+
+
 def _posix_group_is_ours(pgid: int, start_time: float, scan: bool = True) -> bool:
     members = _POSIX_MEMBERS.get(pgid, {pgid: start_time})
     live = {}
     for pid, created in members.items():
         try:
-            if _same_start(pid, created) and os.getpgid(pid) == pgid:
+            if _same_start(pid, created) and _in_posix_group(pid, pgid):
                 live[pid] = created
         except (psutil.Error, OSError):
             continue

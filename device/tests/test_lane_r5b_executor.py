@@ -14,7 +14,7 @@ def _stat(pid, ticks, name="sleep"):
     return f"{pid} ({name}) S " + " ".join(["0"] * 18) + f" {ticks} 0 0\n"
 
 
-def _run_guardian(lines, identities, *, platform="darwin", groups=None, sessions=None, clock=None, at_eof=None, at_line=None, stat_files=None):
+def _run_guardian(lines, identities, *, platform="darwin", groups=None, sessions=None, clock=None, at_eof=None, at_line=None, stat_files=None, unreachable=(), zombies=()):
     killed = []
     groups = groups if groups is not None else {}
     sessions = sessions if sessions is not None else {}
@@ -23,10 +23,10 @@ def _run_guardian(lines, identities, *, platform="darwin", groups=None, sessions
     def process(pid):
         if pid not in identities:
             raise psutil.NoSuchProcess(pid)
-        return SimpleNamespace(pid=pid, create_time=lambda: identities[pid])
+        return SimpleNamespace(pid=pid, create_time=lambda: identities[pid], status=lambda: "zombie" if pid in zombies else "sleeping")
 
     def getpgid(pid):
-        if pid not in identities:
+        if pid not in identities or pid in unreachable:
             raise ProcessLookupError(pid)
         return groups.get(pid, 100)
 
@@ -59,7 +59,7 @@ def _run_guardian(lines, identities, *, platform="darwin", groups=None, sessions
         "sys": SimpleNamespace(stdin=incoming, stdout=outgoing, platform=platform),
         "select": SimpleNamespace(select=lambda *args: ([incoming], [], [])),
         "time": SimpleNamespace(monotonic=lambda: clock[0]),
-        "psutil": SimpleNamespace(Process=process, process_iter=lambda: [process(pid) for pid in list(identities)], pid_exists=lambda pid: pid in identities, Error=psutil.Error),
+        "psutil": SimpleNamespace(Process=process, process_iter=lambda: [process(pid) for pid in list(identities)], pid_exists=lambda pid: pid in identities, Error=psutil.Error, STATUS_ZOMBIE="zombie"),
     }
     actual_import = builtins.__import__
 
@@ -120,6 +120,59 @@ def test_a_new_registration_does_not_inherit_continuity_from_an_older_group():
 
     output, _ = _run_guardian(['set 100 1.0 {"100":1.0,"101":2.0}\n', 'add 100 5.0 {"100":5.0}\n'], identities, at_line=replaced)
     assert output.splitlines()[-1] == "ack {}"
+
+
+@pytest.mark.parametrize("case", ["zombie_leader", "bare_esrch", "zombie_member"])
+def test_guardian_keeps_a_group_while_its_exited_leader_is_an_unreaped_zombie(case):
+    # macOS getpgid fails with ESRCH on a zombie, and the agent sends `set` only after its drain grace.
+    identities = {100: 1.0, 101: 2.0} if case == "zombie_member" else {100: 1.0}
+    clock = [100.0]
+    unreachable, zombies = set(), set()
+
+    def leader_exits(line):
+        if line.startswith("check"):
+            clock[0] += executor._POSIX_CONTINUITY_WINDOW + 0.5
+            identities[102] = 3.0
+            if case == "zombie_member":
+                identities.pop(100)
+                unreachable.add(101)
+                zombies.add(101)
+            else:
+                unreachable.add(100)
+                if case == "zombie_leader":
+                    zombies.add(100)
+
+    lines = ['add 100 1.0 {"100":1.0,"101":2.0}\n' if case == "zombie_member" else "add 100 1.0\n", "check 999\n"]
+    _, killed = _run_guardian(lines, identities, clock=clock, at_line=leader_exits, at_eof=lambda: identities.pop(100, None), unreachable=unreachable, zombies=zombies)
+    assert killed == ([(100, 9)] if case == "zombie_leader" else [])
+
+
+@pytest.mark.parametrize("case", ["zombie_leader", "bare_esrch", "zombie_member"])
+def test_parent_group_check_keeps_an_exited_leader_that_is_an_unreaped_zombie(monkeypatch, case):
+    identities = {100: 1.0, 101: 2.0, 102: 3.0}
+    unreachable = {101} if case == "zombie_member" else {100}
+    zombies = set() if case == "bare_esrch" else unreachable
+    if case == "zombie_member":
+        identities.pop(100)
+
+    def process(pid):
+        if pid not in identities:
+            raise psutil.NoSuchProcess(pid)
+        return SimpleNamespace(pid=pid, create_time=lambda: identities[pid], status=lambda: psutil.STATUS_ZOMBIE if pid in zombies else psutil.STATUS_SLEEPING)
+
+    def getpgid(pid):
+        if pid not in identities or pid in unreachable:
+            raise ProcessLookupError(pid)
+        return 100
+
+    monkeypatch.setattr(executor, "_LINUX", False)
+    monkeypatch.setattr(executor, "_POSIX_MEMBERS", {100: {100: 1.0, 101: 2.0}} if case == "zombie_member" else {})
+    monkeypatch.setattr(executor.psutil, "Process", process)
+    monkeypatch.setattr(executor.psutil, "process_iter", lambda: [process(pid) for pid in list(identities)])
+    monkeypatch.setattr(executor.os, "getpgid", getpgid, raising=False)
+    assert executor._posix_group_is_ours(100, 1.0) == (case == "zombie_leader")
+    if case == "zombie_leader":
+        assert executor._POSIX_MEMBERS[100] == {100: 1.0, 101: 2.0, 102: 3.0}
 
 
 @pytest.mark.parametrize("ticks", [4242, 4243])
