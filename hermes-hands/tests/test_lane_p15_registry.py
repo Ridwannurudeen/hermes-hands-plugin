@@ -56,8 +56,13 @@ def test_real_registry_launch_and_polls_reach_the_device_unchanged(dispatch, mon
             else environment._registry_command(command)[0]
             for command, *_ in calls
         ]
-        assert kinds[0] == "launch" and kinds[-1] == "exit", kinds
-        assert set(kinds) == {"launch", "log", "probe", "exit"}, kinds
+        if calls[1][0].startswith("if kill -0 "):
+            assert kinds[0] == "launch" and kinds[-1] == "log", kinds
+            assert set(kinds) == {"launch", "log"}, kinds
+            assert calls[-1][3]["output"].partition("\n")[0].split()[2] == "exit:0"
+        else:
+            assert kinds[0] == "launch" and kinds[-1] == "exit", kinds
+            assert set(kinds) == {"launch", "log", "probe", "exit"}, kinds
         for command, cwd, kwargs, execution, jobs in calls:
             assert messages.WITNESS_CALL_CHANGED not in execution["output"], (command, execution)
             assert jobs, (command, execution)

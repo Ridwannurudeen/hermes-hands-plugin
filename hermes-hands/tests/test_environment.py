@@ -1048,8 +1048,10 @@ class FakeSub:
         self.commands.append(command)
         if "nohup bash -lc" in command:
             return {"output": f"{self.pids.pop(0)}\n", "returncode": 0}
-        if self.answer is not None and command.startswith("kill "):
+        if self.answer is not None and command.startswith(("kill ", "if kill -0 ")):
             return dict(self.answer)
+        if command.startswith("if kill -0 "):
+            return {"output": "0 0 " + ("run" if self.alive else "exit:0") + "\n", "returncode": 0}
         if command.startswith("kill -0 "):
             return {"output": "0" if self.alive else "1", "returncode": 0}
         if ".exit" in command:

@@ -45,7 +45,12 @@ _BACKGROUND_PROBE = re.compile(
     rf'kill -0 "\$\(cat ({_SHELL_WORD}) 2>/dev/null\)" 2>/dev/null; echo \$\?'
 )
 _BACKGROUND_EXIT = re.compile(rf"cat ({_SHELL_WORD}) 2>/dev/null")
-_BACKGROUND_LOG = re.compile(rf"O=(\d+); S=\$\(\{{ wc -c < ({_SHELL_WORD}); \}}")
+_BACKGROUND_LOG = re.compile(
+    rf'(?:if kill -0 "\$\(cat (?P<pid>{_SHELL_WORD}) 2>/dev/null\)" 2>/dev/null; then T=run; '
+    rf'else T="exit:\$\(cat (?P<exit>{_SHELL_WORD}) 2>/dev/null \| tr -dc \'0-9\'\)"; fi; )?'
+    rf"O=(?P<offset>\d+); S=\$\(\{{ wc -c < (?P<log>{_SHELL_WORD}); \}}"
+)
+_BACKGROUND_EXIT_HEADER = re.compile(r"[0-9]{1,20} [0-9]{1,20} exit:[0-9]{0,9}")
 # Core launcher fields: folder, command, log, exit file and pid file (process_registry.py:1282-1288).
 _LAUNCH_WRAPPER = re.compile(
     rf"mkdir -p ({_SHELL_WORD}) && \( nohup bash -lc ({_SHELL_WORD}) > ({_SHELL_WORD}) 2>&1; "
@@ -179,14 +184,19 @@ def _file_tool() -> bool:
     return client.current_tool() in _FILE_TOOLS
 
 
-def _log_delta_command(quoted_log_path: str, offset: int) -> str:
-    """Core's background log read, copied from tools/process_registry_env_log.py (Hermes v0.23.0 and
-    v0.23.1): a poll that is not exactly this command is not core's and follows no job."""
-    return (
-        f"O={offset}; "
-        f"S=$({{ wc -c < {quoted_log_path}; }} 2>/dev/null | tr -dc '0-9'); "
-        f"S=${{S:-0}}; "
-        f'if [ "$S" -lt "$O" ]; then O=0; fi; '
+def _log_delta_command(
+    quoted_log_path: str, offset: int, quoted_pid_path: str | None = None,
+    quoted_exit_path: str | None = None,
+) -> str:
+    """Core's background log reads, copied from tools/process_registry_env_log.py (Hermes v0.23.1
+    and v0.23.2): a poll that is not exactly one of these commands follows no job."""
+    status = ""
+    if quoted_pid_path is not None and quoted_exit_path is not None:
+        status = (
+            f'if kill -0 "$(cat {quoted_pid_path} 2>/dev/null)" 2>/dev/null; then T=run; '
+            f"else T=\"exit:$(cat {quoted_exit_path} 2>/dev/null | tr -dc '0-9')\"; fi; "
+        )
+    trim = (
         f'N=0; P=$S; while [ "$P" -gt "$O" ] && [ "$N" -lt 3 ]; do '
         f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | od -An -to1 | tr -dc '0-9'); "
         f'case "$B" in 2[0-7][0-7]) P=$((P-1)); N=$((N+1));; *) break;; esac; done; '
@@ -194,7 +204,17 @@ def _log_delta_command(quoted_log_path: str, offset: int) -> str:
         f"B=$(tail -c +$P {quoted_log_path} 2>/dev/null | head -c 1 | od -An -to1 | tr -dc '0-9'); "
         f'case "$B" in 3[0-3][0-7]) L=2;; 3[4-5][0-7]) L=3;; 3[6-7][0-7]) L=4;; *) L=1;; esac; '
         f'if [ "$L" -gt $((N+1)) ]; then S=$((P-1)); fi; fi; '
-        f'echo "$S $O"; '
+    )
+    if status:
+        trim = f'case "$T" in exit:*) ;; *) {trim}esac; '
+    return (
+        status
+        + f"O={offset}; "
+        f"S=$({{ wc -c < {quoted_log_path}; }} 2>/dev/null | tr -dc '0-9'); "
+        f"S=${{S:-0}}; "
+        f'if [ "$S" -lt "$O" ]; then O=0; fi; '
+        + trim
+        + f'echo "$S $O{" $T" if status else ""}"; '
         f'if [ "$S" -gt "$O" ]; then '
         f"tail -c +$((O+1)) {quoted_log_path} 2>/dev/null | head -c $((S-O)); fi"
     )
@@ -507,8 +527,14 @@ def _registry_command(command: str) -> tuple[str, str] | None:
         job = _job_file(exit_read.group(1), "exit")
         return None if job is None else ("exit", job)
     poll = _BACKGROUND_LOG.match(command)
-    if poll is not None and command == _log_delta_command(poll.group(2), int(poll.group(1))):
-        job = _job_file(poll.group(2), "log")
+    if poll is not None and command == _log_delta_command(
+        poll.group("log"), int(poll.group("offset")), poll.group("pid"), poll.group("exit")
+    ):
+        job = _job_file(poll.group("log"), "log")
+        if poll.group("pid") is not None and (
+            _job_file(poll.group("pid"), "pid") != job or _job_file(poll.group("exit"), "exit") != job
+        ):
+            return None
         return None if job is None else ("log", job)
     return None
 
@@ -851,7 +877,9 @@ class HandsEnvironment(BaseEnvironment):
             if kind == "log":
                 poll = _BACKGROUND_LOG.match(command)
                 if poll is not None:
-                    expected.add(_log_delta_command(log, int(poll.group(1))))
+                    offset = int(poll.group("offset"))
+                    expected.add(_log_delta_command(log, offset))
+                    expected.add(_log_delta_command(log, offset, pid, exited))
             elif kind == "exit":
                 expected.add(f"cat {exited} 2>/dev/null")
             elif kind == "probe":
@@ -879,7 +907,10 @@ class HandsEnvironment(BaseEnvironment):
             self._job_ended(killed)
             return result
         if kind != "probe":
-            if kind == "exit":
+            if kind == "exit" or (
+                kind == "log" and poll.group("pid") is not None and result.get("returncode") == 0
+                and _BACKGROUND_EXIT_HEADER.fullmatch(output.partition("\n")[0].strip()) is not None
+            ):
                 self._job_ended([value])
             return result
         if result.get("returncode") == 0 and lines and lines[-1].strip().lstrip("-").isdigit():

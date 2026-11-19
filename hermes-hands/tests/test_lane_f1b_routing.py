@@ -2,6 +2,8 @@
 core's own registry commands follow a job to its device, and an active witness device gets no
 unapproved fetch or spill."""
 
+import inspect
+
 import pytest
 
 pytest.importorskip("tools.environments.base")
@@ -154,9 +156,11 @@ def test_the_copied_log_read_is_cores_own():
 
     from hands.environment import _log_delta_command
 
+    combined = "quoted_pid_path" in inspect.signature(log_delta_command).parameters
     for path in ("/tmp/hermes_bg_abc.log", "'/c/Users/r b/hermes_bg_x-1.log'", "/var/tmp/hermes_bg_9.log"):
+        status_paths = (path.replace(".log", ".pid"), path.replace(".log", ".exit")) if combined else ()
         for offset in (0, 1, 4096, 10**9):
-            assert _log_delta_command(path, offset) == log_delta_command(path, offset)
+            assert _log_delta_command(path, offset, *status_paths) == log_delta_command(path, offset, *status_paths)
 
 
 def test_only_cores_exact_registry_commands_follow_a_job(laptop):
@@ -171,6 +175,9 @@ def test_only_cores_exact_registry_commands_follow_a_job(laptop):
         sessions.append(process_registry.spawn_via_env(env, "sleep 600", task_id="bg-b"))
         job = sessions[0].id
         store.set_session_target("s1", "desk")
+        status_paths = (f"/tmp/hermes_bg_{job}.pid", f"/tmp/hermes_bg_{job}.exit") if (
+            "quoted_pid_path" in inspect.signature(log_delta_command).parameters
+        ) else ()
         for command in (
             f"cat /tmp/hermes_bg_{job}.exit 2>/dev/null; touch /tmp/owned",
             f"cat /tmp/hermes_bg_{job}.log.cmd 2>/dev/null",
@@ -178,14 +185,14 @@ def test_only_cores_exact_registry_commands_follow_a_job(laptop):
             f'kill -0 "$(cat /tmp/hermes_bg_{job}.exit 2>/dev/null)" 2>/dev/null; echo $?',
             "kill 4242 2>/dev/null; rm -rf /tmp/x",
             f'kill -0 "$(cat /tmp/hermes_bg_{job}.pid 2>/dev/null)" 2>/dev/null; echo $?; touch /tmp/owned',
-            log_delta_command(f"/tmp/hermes_bg_{job}.log", 0) + "; touch /tmp/owned",
+            log_delta_command(f"/tmp/hermes_bg_{job}.log", 0, *status_paths) + "; touch /tmp/owned",
         ):
             env.execute(command)
             assert command not in jobs.commands and desk.commands[-1] == command
         probe = f'kill -0 "$(cat /tmp/hermes_bg_{job}.pid 2>/dev/null)" 2>/dev/null; echo $?'
         env.execute(probe, timeout=5)
         assert jobs.commands[-1] == probe and probe not in desk.commands
-        poll = log_delta_command(f"/tmp/hermes_bg_{job}.log", 7)
+        poll = log_delta_command(f"/tmp/hermes_bg_{job}.log", 7, *status_paths)
         env.execute(poll, timeout=10)
         assert jobs.commands[-1] == poll and poll not in desk.commands
     finally:
