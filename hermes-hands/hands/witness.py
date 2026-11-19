@@ -499,14 +499,17 @@ def _python_source_assignments(message: str) -> bool:
 def _secret_problem(message: str, *, source: bool = False, card: bool = False, slash_comments: bool = False, unspaced: bool = True, spacing_hint: bool = False) -> str | None:
     from agent.redact import redact_sensitive_text
 
-    if redact_sensitive_text(message, force=True) != message:
-        if source and not card and unspaced and spacing_hint and _python_source_assignments(message):
-            spaced = _SECRET_ASSIGNMENT.sub(
-                lambda assignment: re.sub(r"[ \t]*=[ \t]*$", " = ", assignment.group()), message
-            )
+    masked = redact_sensitive_text(message, force=True) != message
+    if source and not card and unspaced and spacing_hint and _python_source_assignments(message):
+        spaced = _SECRET_ASSIGNMENT.sub(
+            lambda assignment: re.sub(r"[ \t]*=[ \t]*$", " = ", assignment.group()), message
+        )
+        spaced_masked = redact_sensitive_text(spaced, force=True) != spaced
+        if spaced_masked:
+            return messages.WITNESS_SECRET_HIDDEN
+        if masked:
             if (
                 spaced != message
-                and redact_sensitive_text(spaced, force=True) == spaced
                 and _secret_problem(spaced, source=True, slash_comments=slash_comments) is None
                 and not any(
                     _OPAQUE_SOURCE_VALUE.match(message[assignment.end():])
@@ -517,6 +520,7 @@ def _secret_problem(message: str, *, source: bool = False, card: bool = False, s
                     messages.WITNESS_SECRET_HIDDEN
                     + " if this is ordinary code, writing it with spaces around = (token = token) is not masked"
                 )
+    if masked:
         return messages.WITNESS_SECRET_HIDDEN
     if any(
         hint.lastgroup != "assignment" or not (source and unspaced)
