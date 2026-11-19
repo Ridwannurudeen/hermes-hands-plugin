@@ -54,13 +54,16 @@ def witness_hook(monkeypatch):
 
 def load_tools(monkeypatch, screenshot=None, session_key=""):
     from hands.client import HandsError
+    import hands
+
+    importlib.import_module("hands.tools")
+    monkeypatch.delitem(sys.modules, "hands.tools")
+    monkeypatch.delattr(hands, "tools")
 
     client = types.ModuleType("hands.client")
     client.HandsError = HandsError
     client.request_screenshot = screenshot or (lambda device: b"png")
     monkeypatch.setitem(sys.modules, "hands.client", client)
-    import hands
-
     monkeypatch.setattr(hands, "client", client, raising=False)
     gateway = types.ModuleType("gateway")
     gateway.__path__ = []
@@ -68,7 +71,6 @@ def load_tools(monkeypatch, screenshot=None, session_key=""):
     session_context.get_session_env = lambda key, default="": session_key
     monkeypatch.setitem(sys.modules, "gateway", gateway)
     monkeypatch.setitem(sys.modules, "gateway.session_context", session_context)
-    sys.modules.pop("hands.tools", None)
     tools = importlib.import_module("hands.tools")
 
     ctx = Context()
@@ -81,6 +83,23 @@ def test_screenshot_refuses_cron(monkeypatch):
     ctx.cron = object()
     result = json.loads(ctx.handlers["hands_screenshot"]({}))
     assert "cron" in result["error"]
+
+
+def test_load_tools_restores_real_modules_on_teardown(monkeypatch):
+    import hands
+
+    real_tools = importlib.import_module("hands.tools")
+    real_client = hands.client
+    with monkeypatch.context() as isolated:
+        load_tools(isolated)
+        assert hands.tools is not real_tools
+        assert hands.tools.client is not real_client
+
+    assert sys.modules["hands.tools"] is real_tools
+    assert hands.tools is real_tools
+    assert sys.modules["hands.client"] is real_client
+    assert hands.client is real_client
+    assert hands.tools.client is real_client
 
 
 def test_screenshot_refuses_server(monkeypatch):
