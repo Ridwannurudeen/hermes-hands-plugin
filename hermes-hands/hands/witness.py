@@ -1366,6 +1366,8 @@ def pre_tool_call(ctx, tool_name: str, args: dict, **kwargs):
                 args["path"] = "."
         if _mistyped(tool_name, args):
             return {"action": "block", "message": messages.WITNESS_ARGUMENT_TYPES_BLOCKED}
+        if tool_name == "search_files" and isinstance(args.get("pattern"), str) and args["pattern"].startswith("-"):
+            return {"action": "block", "message": "search patterns starting with - are refused: drop the leading dash or search for it another way"}
         multiline = _CONTENT_KEYS.get(tool_name, ())
         if any(
             _hidden_characters(key) or _hidden_characters(value, "\n\r\t" if key in multiline else "")

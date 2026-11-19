@@ -915,7 +915,7 @@ class HandsEnvironment(BaseEnvironment):
             return result
         if kind != "probe":
             if kind == "exit" or (
-                kind == "log" and poll.group("pid") is not None and result.get("returncode") == 0
+                kind == "log" and poll.group("pid") is not None
                 and _BACKGROUND_EXIT_HEADER.fullmatch(output.partition("\n")[0].strip()) is not None
             ):
                 self._job_ended([value])

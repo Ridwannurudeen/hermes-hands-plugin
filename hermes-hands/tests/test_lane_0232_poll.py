@@ -29,7 +29,8 @@ def job(laptop):
 
 
 @pytest.mark.parametrize("exit_code", ["0", "7", ""])
-def test_combined_run_and_final_delta_are_unchanged_and_release_the_route(job, monkeypatch, exit_code):
+@pytest.mark.parametrize("returncode", [0, 1])
+def test_combined_run_and_final_delta_are_unchanged_and_release_the_route(job, monkeypatch, exit_code, returncode):
     env, device, desk, (log, exited, pid) = job
     running = "11 0 run\n0 0 exit:0\n"
     final = f"15 11 exit:{exit_code}\nlast"
@@ -37,13 +38,13 @@ def test_combined_run_and_final_delta_are_unchanged_and_release_the_route(job, m
 
     def execute(command, cwd="", **kwargs):
         device.commands.append(command)
-        return {"output": next(replies), "returncode": 0}
+        return {"output": next(replies), "returncode": returncode}
 
     monkeypatch.setattr(device, "execute", execute)
     for offset, output in ((0, running), (11, final)):
         command = environment._log_delta_command(log, offset, pid, exited)
         assert environment._registry_command(command) == ("log", "proc_123456789abc")
-        assert env.execute(command, timeout=10) == {"output": output, "returncode": 0}
+        assert env.execute(command, timeout=10) == {"output": output, "returncode": returncode}
         assert device.commands[-1] == command and desk.commands == []
         if offset == 0:
             assert "proc_123456789abc" in env._background
