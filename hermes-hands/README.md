@@ -50,7 +50,7 @@ No telemetry is collected. Checkup network probes resolve `example.com` and conn
 
 ## Verification
 
-CI runs the full automated suite on Hermes 0.23.1. Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction.
+CI runs the full automated suite on Hermes 0.23.1 and 0.23.2. Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction.
 
 From the repository root, using an environment with Hermes's test dependencies:
 

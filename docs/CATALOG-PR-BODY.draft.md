@@ -20,7 +20,7 @@ Git program-selecting options and their abbreviations are refused on every subco
 
 The console shows every device job, including core's one-time shell snapshot setup. Core also runs login startup code and sources and refreshes its shell snapshot under the call's approval. These inherited shell jobs are not separately approved. The exact-execution guarantee covers the approved command and file operations, within that runtime envelope.
 
-The exact-execution check matches core's generated command text exactly, after device path mapping, and fails closed when core's text changes. It rebuilds complete file-tool command candidates from the approved arguments and checks stdin where applicable; it does not accept a prefix or an approved path embedded in a larger script. This deliberately couples the verifier to core's command templates. CI covers Hermes 0.23.1, the supported minimum.
+The exact-execution check matches core's generated command text exactly, after device path mapping, and fails closed when core's text changes. It rebuilds complete file-tool command candidates from the approved arguments and checks stdin where applicable; it does not accept a prefix or an approved path embedded in a larger script. This deliberately couples the verifier to core's command templates. CI covers Hermes 0.23.1, the supported minimum, and 0.23.2.
 
 ## Rule 12: approvals
 
@@ -52,7 +52,7 @@ In both Hermes 0.23.0 and 0.23.1, `tools/file_tools.py:328-335` returns the cach
 In a witness session, an omitted or null terminal `timeout` for a foreground command becomes one explicit default from the public configuration bridge (180 seconds when unset), shown on the approval card and dispatched unchanged. Preserving the scoped profile default needs a public accessor. A background command has no time limit: in a witness session an explicit `timeout` is refused; leave out `timeout`; press S to stop it. Its approval card shows `background=true` and the no-time-limit statement without a timeout.
 
 
-CI runs the full automated suite on Hermes 0.23.1; `requires_hermes` is `>=0.23.1` in both the manifest and the entry. The gateway supports Linux and WSL. Devices are native Windows with Git Bash and Linux; macOS devices are not supported. The device installs with `pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@5e41ed0070c15ee05916a40290b9ea71e2709e49#subdirectory=device"` (the commit with the guardian cleanup fix and the macOS exited leader fix, pinned by its full 40 character SHA); screenshots work after that install on a desktop session, with the person's yes for each shot. Witness mode needs an interactive terminal and cannot run as a service.
+CI runs the full automated suite on Hermes 0.23.1 and 0.23.2; `requires_hermes` is `>=0.23.1` in both the manifest and the entry. The gateway supports Linux and WSL. Devices are native Windows with Git Bash and Linux; macOS devices are not supported. The device installs with `pipx install "git+https://github.com/Ridwannurudeen/hermes-hands-plugin@5e41ed0070c15ee05916a40290b9ea71e2709e49#subdirectory=device"` (the commit with the guardian cleanup fix and the macOS exited leader fix, pinned by its full 40 character SHA); screenshots work after that install on a desktop session, with the person's yes for each shot. Witness mode needs an interactive terminal and cannot run as a service.
 
 Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction.
 

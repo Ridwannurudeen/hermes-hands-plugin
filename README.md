@@ -37,7 +37,7 @@ Step 5 relies on WSL 2 forwarding a port bound to localhost in WSL to `localhost
 
 ## Versions
 
-The gateway plugin is version 0.2.1; the device package stays at 0.2.0. CI runs the full automated suite on Hermes 0.23.1. The supported minimum is Hermes 0.23.1; the manifest declares `>=0.23.1`. The plugin still imports two names outside Hermes's public plugin list, `register_token_route` and `LocalEnvironment`, which a later release can change (see [the hook request](docs/HOOK-REQUEST-ISSUE.md)).
+The gateway plugin is version 0.2.1; the device package stays at 0.2.0. CI runs the full automated suite on Hermes 0.23.1 and 0.23.2. The supported minimum is Hermes 0.23.1; the manifest declares `>=0.23.1`. The plugin still imports two names outside Hermes's public plugin list, `register_token_route` and `LocalEnvironment`, which a later release can change (see [the hook request](docs/HOOK-REQUEST-ISSUE.md)).
 
 Device non-test files are byte-identical to `7e078a50d3a09066aa3e95c3c1a86a9ec221996b` except `executor.py`, which has two changes. First, if the agent died before a guardian acknowledgement write, the write could fail and skip job-group cleanup. The guardian loop now uses `try/finally` so an acknowledgement write failure still invokes cleanup for registered job groups. Second, macOS refuses `getpgid` on an exited process that has not been reaped, so the guardian and the agent's own group check now treat an exited but unreaped group leader as still holding its group while its start time matches; no other process can lead that group until the leader is reaped. Its other process identity checks are unchanged. The device version remains 0.2.0, but this pinned build differs from the published v0.2.0 tag.
 
@@ -325,7 +325,7 @@ This repository holds both halves. `hermes-hands/` is the gateway plugin that He
 
 ## Tests and validation
 
-CI runs the full automated suite covering the gateway plugin and device agent on Hermes 0.23.1. Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction. For the full integration run, use a Python environment with Hermes's test dependencies installed and point `PYTHONPATH` at a supported Hermes source checkout:
+CI runs the full automated suite covering the gateway plugin and device agent on Hermes 0.23.1 and 0.23.2. Witness tests cover single query, cron and unattended approve and deny modes, finite unattended turns, a normal human yes, and secret refusal against core redaction. For the full integration run, use a Python environment with Hermes's test dependencies installed and point `PYTHONPATH` at a supported Hermes source checkout:
 
 ```sh
 PYTHONPATH=/path/to/hermes-agent python -m pytest hermes-hands/tests device/tests -q -p no:cacheprovider
@@ -333,7 +333,7 @@ PYTHONPATH=/path/to/hermes-agent python -m pytest hermes-hands/tests device/test
 
 `hermes plugins validate hermes-hands` passes its checks and warns about two imports outside the public plugin list, `register_token_route` and `LocalEnvironment` which the hook request covers. It also reports that the plugin's dashboard authentication runs in the dashboard process.
 
-The workflows in `.github/workflows/` cover the plugin on Ubuntu and Windows and the device on Ubuntu, Windows and macOS. The device CI tests on Python 3.11, 3.12 and 3.13 with the `keyring` extra installed. Plugin CI validates the plugin and doctor, runs the plugin suite against Hermes 0.23.1, validates the catalog entry draft, scans plugin payloads, and checks Python changes for Windows footguns. A push of a release tag also runs `scripts/check-freeze.py` against a temporary catalog copy whose SHA and URL pins must match the tagged commit.
+The workflows in `.github/workflows/` cover the plugin on Ubuntu and Windows and the device on Ubuntu, Windows and macOS. The device CI tests on Python 3.11, 3.12 and 3.13 with the `keyring` extra installed. Plugin CI validates the plugin and doctor, runs the plugin suite against Hermes 0.23.1 and 0.23.2, validates the catalog entry draft, scans plugin payloads, and checks Python changes for Windows footguns. A push of a release tag also runs `scripts/check-freeze.py` against a temporary catalog copy whose SHA and URL pins must match the tagged commit.
 
 ## Live verification
 
