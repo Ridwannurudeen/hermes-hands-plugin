@@ -34,8 +34,14 @@ def test_cheap_secret_shapes_are_refused(text, monkeypatch):
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
     assert witness._SECRET_HINT.search(text) is not None
     assert witness._contains_secret(text)
-    expected = messages.WITNESS_SECRET_HIDDEN if text.startswith(("service --password", "AccountKey=")) else messages.WITNESS_SECRET_BLOCKED
+    from agent.redact import redact_sensitive_text
+
     for prefix in ("", "ordinary notes " * 30):
+        value = prefix + text
+        expected = (
+            messages.WITNESS_SECRET_HIDDEN if redact_sensitive_text(value, force=True) != value
+            else messages.WITNESS_SECRET_BLOCKED
+        )
         assert witness.pre_tool_call(
             object(), "write_file", {"path": "/notes.txt", "content": prefix + text}
         ) == {"action": "block", "message": expected}

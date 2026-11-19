@@ -101,7 +101,7 @@ def test_unspaced_credential_assignments_are_refused_before_any_job(dispatch, co
 def test_hands_literal_refusal_has_precise_message():
     from agent.redact import redact_sensitive_text
 
-    content = 'password = "hunter2"'
+    content = 'password = r"hunter2"'
     assert redact_sensitive_text(content, force=True) == content
     assert witness._contains_secret(content)
     assert messages.WITNESS_SECRET_BLOCKED == (
@@ -142,11 +142,7 @@ def test_unspaced_source_reaches_registered_file_handler(dispatch, monkeypatch, 
     from agent.redact import redact_sensitive_text
 
     result = d.invoke(tool, args)
-    if content in {
-        "client = Client(token=token, api_key=api_key)",
-        "client = Client(token = token, api_key = api_key)",
-        "password=True",
-    }:
+    if redact_sensitive_text(content, force=True) != content:
         assert redact_sensitive_text(content, force=True) != content
         assert messages.WITNESS_SECRET_HIDDEN in result
         assert "approval card would hide" in result
@@ -231,8 +227,10 @@ def test_unspaced_terminal_arguments_stay_refused(dispatch, content):
     'token="${VAR}"', 'token="$VAR"',
 ])
 def test_unspaced_source_expression_spellings(content):
-    if content == "password=True":
-        assert messages.WITNESS_SECRET_HIDDEN in witness._secret_problem(content, source=True)
+    from agent.redact import redact_sensitive_text
+
+    if redact_sensitive_text(content, force=True) != content:
+        assert witness._secret_problem(content, source=True) == messages.WITNESS_SECRET_HIDDEN
     else:
         assert not witness._contains_secret(content, source=True)
 
@@ -269,9 +267,16 @@ def test_unspaced_source_keeps_short_known_token_prefix_refusals(content):
     (True, True, True, False), (True, False, False, False),
 ])
 def test_core_masked_spacing_hint_requires_source_context(source, card, unspaced, expected_hint):
+    from agent.redact import redact_sensitive_text
+
     problem = witness._secret_problem("password=True", source=source, card=card, unspaced=unspaced, spacing_hint=True)
-    assert messages.WITNESS_SECRET_HIDDEN in problem
-    assert ("spaces around =" in problem) == expected_hint
+    if redact_sensitive_text("password=True", force=True) != "password=True":
+        assert messages.WITNESS_SECRET_HIDDEN in problem
+        assert ("spaces around =" in problem) == expected_hint
+    elif source and unspaced:
+        assert problem is None
+    else:
+        assert problem == messages.WITNESS_SECRET_BLOCKED
 
 
 def test_core_masked_spacing_hint_checks_forced_redaction_at_call_time(monkeypatch):

@@ -64,6 +64,13 @@ def test_source_identifiers_expressions_and_placeholders_reach_exact_write(dispa
     monkeypatch.setattr(d.ctx, "session_surface", lambda: "telegram")
     target = d.home / "work" / ("source" + extension)
     result = d.invoke("write_file", {"path": f"{d.base}/work/source{extension}", "content": content})
+    from agent.redact import redact_sensitive_text
+
+    if redact_sensitive_text(content, force=True) != content:
+        assert messages.WITNESS_SECRET_HIDDEN in result, result
+        assert d.cards == [] and d.answers == [] and d.jobs == []
+        assert not target.exists()
+        return
     assert not json.loads(result).get("error"), result
     assert len(d.cards) == len(d.answers) == 1 and d.jobs
     assert target.read_bytes() == content.encode()
@@ -187,17 +194,31 @@ def test_grouped_and_awaited_lookalikes_stay_refused(dispatch, monkeypatch, tool
     (".js", "password=True", False),
     (".txt", "password=True", False),
 ])
-def test_spacing_hint_requires_a_whole_python_assignment(dispatch, tool, extension, content, whole_source):
+def test_spacing_hint_requires_a_whole_python_assignment(dispatch, monkeypatch, tool, extension, content, whole_source):
     d = dispatch
+    monkeypatch.setattr(d.ctx, "session_surface", lambda: "telegram")
     target = d.home / "work" / ("source" + extension)
     target.write_bytes(b"old")
     args = {"path": f"{d.base}/work/source{extension}"}
     args.update({"content": content} if tool == "write_file" else {"old_string": "old", "new_string": content})
     result = d.invoke(tool, args)
-    assert messages.WITNESS_SECRET_HIDDEN in result, result
-    assert ("spaces around =" in result) == (tool == "write_file" and whole_source)
-    assert d.cards == [] and d.answers == [] and d.jobs == []
-    assert target.read_bytes() == b"old"
+    from agent.redact import redact_sensitive_text
+
+    if redact_sensitive_text(content, force=True) != content:
+        assert messages.WITNESS_SECRET_HIDDEN in result, result
+        assert ("spaces around =" in result) == (tool == "write_file" and whole_source)
+        assert d.cards == [] and d.answers == [] and d.jobs == []
+        assert target.read_bytes() == b"old"
+    elif extension in {".py", ".js"}:
+        assert not json.loads(result).get("error"), result
+        assert len(d.cards) == len(d.answers) == 1 and d.jobs
+        assert target.read_bytes() == content.encode()
+        assert any(job.get("stdin") == content for job in d.jobs), d.jobs
+    else:
+        assert messages.WITNESS_SECRET_BLOCKED in result, result
+        assert "spaces around =" not in result
+        assert d.cards == [] and d.answers == [] and d.jobs == []
+        assert target.read_bytes() == b"old"
 
 
 def test_patch_inside_python_configuration_string_does_not_suggest_retry(dispatch):

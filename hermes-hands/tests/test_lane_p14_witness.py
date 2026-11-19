@@ -67,7 +67,7 @@ def test_credential_literals_and_environment_lookalikes_are_refused(monkeypatch,
 def test_hands_only_secret_refusal_does_not_claim_core_hides_it(monkeypatch):
     from agent.redact import redact_sensitive_text
 
-    content = 'password = "hunter2"'
+    content = 'password = r"hunter2"'
     assert redact_sensitive_text(content, force=True) == content
     monkeypatch.setattr(witness, "_selected_device", lambda ctx: DEVICE)
     result = witness.pre_tool_call(object(), "write_file", {"path": "/notes.py", "content": content})
