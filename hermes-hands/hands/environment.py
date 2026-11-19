@@ -356,6 +356,7 @@ def _file_candidates(tool: str, args: dict, path: str, command: str) -> set[str]
             f"test -e {arg} && echo exists || echo not_found",
             f"test -d {parent} && echo yes || echo no",
             f"ls -1 {parent} 2>/dev/null | head -20",
+            f"ls -1 -- {parent} 2>/dev/null | head -20",
         }
         expected |= {f"command -v {binary} >/dev/null 2>&1 && echo 'yes'" for binary in ("grep", "find")}
         return expected
@@ -450,6 +451,8 @@ def _searched(args: dict, command: str, roots: set[str]) -> bool:
     if not isinstance(context, int):
         return False
     order = args.get("order", "discovery")
+    # v0.23.2 delimits the pattern and path; accept only either complete core spelling.
+    patterns = ([_quoted(pattern)], ["-e", _quoted(pattern), "--"])
     expected = set()
     for root in roots:
         shell_root = device_path(root).replace("\\", "/") if os.name == "nt" else root
@@ -491,23 +494,27 @@ def _searched(args: dict, command: str, roots: set[str]) -> bool:
             words = [rg, "--line-number", "--no-heading", "--with-filename"]
             words += [] if mode in _OUTPUT_FLAGS else ["--max-columns", "2000", "--max-columns-preview"]
             words += ["--multiline"] if _REGEX_NEWLINE.search(pattern) else []
-            words += around + (["--glob", _quoted(glob)] if glob else []) + flag + [_quoted(pattern), native]
-            expected.add(f"set -o pipefail; {' '.join(words)} | head -n {fetch}")
+            words += around + (["--glob", _quoted(glob)] if glob else []) + flag
+            for argument in patterns:
+                expected.add(f"set -o pipefail; {' '.join(words + argument + [native])} | head -n {fetch}")
             glob_expr = f" --glob {_quoted(glob)}" if glob else ""
             prunes = " ".join(f"--glob {_quoted('!' + prefix + name + '/**')}" for name in _SEARCH_HINT_PRUNES for prefix in ("", "**/"))
             flags = ["-i", "--hidden --no-ignore"] + (["-F"] if re.search(r"[.\[\](){}?*+^$\\|]", pattern) else [])
             for hint_flag in flags:
                 filters = f"{glob_expr} {prunes}" if hint_flag.startswith("--hidden") else glob_expr
-                expected.add(f"{rg} {hint_flag} --count-matches {filters} {_quoted(pattern)} {native} 2>/dev/null | head -n 50")
+                for argument in patterns:
+                    expected.add(f"{rg} {hint_flag} --count-matches {filters} {' '.join(argument)} {native} 2>/dev/null | head -n 50")
         relative = shell_root.removeprefix("./")
         anchored = root.startswith(("/", "\\\\")) or re.match(r"^[A-Za-z]:[\\/]", root) is not None
         here = quoted if anchored else '"$PWD"' + ("" if relative in {"", "."} else f"/{_quoted(relative)}")
         words = ["grep", "-rnHE", "--exclude-dir='.*'"] + around + (["--include", _quoted(glob)] if glob else [])
-        expected.add(f"set -o pipefail; {' '.join(words + flag + [_quoted(pattern), here])} | head -n {fetch}{cut}")
+        for argument in patterns:
+            expected.add(f"set -o pipefail; {' '.join(words + flag + argument + [here])} | head -n {fetch}{cut}")
         start = _quoted(shell_root or ".")
         words = ["find", "-H", start, f"\\( -type d -name '.*' ! -path {start} \\) -prune", "-o", "-type f"]
         words += (["-name", _quoted(glob)] if glob else []) + ["-exec", "grep", "-nHE"] + around + flag
-        expected.add(f"set -o pipefail; {' '.join(words + [_quoted(pattern), '{}', '+'])} | head -n {fetch}{cut}")
+        for argument in patterns:
+            expected.add(f"set -o pipefail; {' '.join(words + argument + ['{}', '+'])} | head -n {fetch}{cut}")
     return command in expected
 
 
