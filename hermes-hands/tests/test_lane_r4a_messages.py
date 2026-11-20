@@ -32,8 +32,11 @@ def test_session_end_codes_read_as_plain_sentences(error, sentence):
 
 def _handlers(monkeypatch, tmp_path):
     import importlib
+    import hands
 
+    importlib.import_module("hands.tools")
     monkeypatch.delitem(sys.modules, "hands.tools", raising=False)
+    monkeypatch.delattr(hands, "tools")
     tools = importlib.import_module("hands.tools")
     constants = types.ModuleType("hermes_constants")
     constants.get_hermes_home = lambda: tmp_path
